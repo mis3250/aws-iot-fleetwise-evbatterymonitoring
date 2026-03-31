@@ -24,7 +24,7 @@ Parameters:
   SourceRef:
     Description: Source Git branch, tag or commit ID (leave blank for HEAD)
     Type: String
-    Default: "v1.0.3"
+    Default: "v1.3.2"
   SourceUrlBatteryMonitoring:
     Description: Source Git clone URL for Battery Monitoring Sample repo (leave as default)
     Type: String
@@ -127,7 +127,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 30
+            VolumeSize: 50
             VolumeType: gp3
             DeleteOnTermination: true # Recommended so disks don't linger after deletion
       KeyName:
@@ -299,7 +299,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 30
+            VolumeSize: 50
             VolumeType: gp3
             DeleteOnTermination: true # Recommended so disks don't linger after deletion
       KeyName:
@@ -482,7 +482,7 @@ Resources:
     Properties:
       Description: Create thing, certificate, and policy, return cert and private key
       Handler: index.handler
-      Runtime: python3.8
+      Runtime: python3.9
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 300
       Code:
@@ -708,7 +708,7 @@ Mappings:
       AMIID: ami-0327006c87b23e535
   FleetSizeEc2InstanceTypeMap:
     "1":
-      InstanceType: m6g.xlarge
+      InstanceType: m8g.xlarge
     "2":
       InstanceType: m6g.2xlarge
     "10":
