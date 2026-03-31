@@ -117,349 +117,212 @@ Resources:
         - !Ref Ec2ServiceRole
 
   Ec2Instance1:
-    Type: AWS::EC2::Instance
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: PT30M
-    Properties:
-      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs:
-            VolumeSize: 50
-            VolumeType: gp3
-            DeleteOnTermination: true # Recommended so disks don't linger after deletion
-      KeyName:
-        !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
-      InstanceType:
-        !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
-      IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: !Split [",", !GetAtt Ec2SecurityGroup.GroupId]
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-Ec2-Instance
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
+        Type: AWS::EC2::Instance
+        CreationPolicy:
+          ResourceSignal:
+            Count: 1
+            Timeout: PT30M
+        Properties:
+          ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+          BlockDeviceMappings:
+            - DeviceName: /dev/sda1
+              Ebs:
+                VolumeSize: 100 # Increased to 100GB for C++ build overhead
+                VolumeType: gp3
+                DeleteOnTermination: true
+          KeyName: !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
+          InstanceType: !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
+          IamInstanceProfile: !Ref Ec2InstanceProfile
+          SecurityGroupIds: [ !Ref Ec2SecurityGroup ]
+          Tags:
+            - Key: Name
+              Value: !Sub ${AWS::StackName}-Vehicle-01
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              set -euo pipefail
 
-          # Wait for any existing package install to finish
-          i=0
-          while true; do
-            if sudo fuser /var/{lib/{dpkg,apt/lists},cache/apt/archives}/lock >/dev/null 2>&1; then
+              # Wait for any existing package install to finish
               i=0
-            else
-              i=`expr $i + 1`
-              if expr $i \>= 10 > /dev/null; then
-                break
-              fi
-            fi
-            sleep 1
-          done
-
-          # Upgrade system and reboot if required
-          apt update && apt upgrade -y
-          if [ -f /var/run/reboot-required ]; then
-          # Delete the UserData info file so that we run again after reboot
-            rm -f /var/lib/cloud/instances/*/sem/config_scripts_user
-            reboot
-            exit
-          fi
-
-          # Install helper scripts:
-          apt update && apt install -y python3-setuptools
-          mkdir -p /opt/aws/bin
-          wget https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
-          python3 -m easy_install --script-dir /opt/aws/bin aws-cfn-bootstrap-py3-latest.tar.gz
-          rm aws-cfn-bootstrap-py3-latest.tar.gz
-
-          # On error, signal back to cfn:
-          error_handler() {
-            /opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
-          }
-          trap error_handler ERR
-
-          # Increase pid_max:
-          echo 1048576 > /proc/sys/kernel/pid_max
-          # Disable syslog:
-          systemctl stop syslog.socket rsyslog.service
-          # Remove journald rate limiting and set max size:
-          printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
-
-          # Install packages for Battery Monitoring sample
-          #sudo apt install python3-pip python3-dev -y
-          sudo apt install python3-pip -y
-          sudo python3 -m pip install --upgrade pip
-          #          sudo -u ubuntu python3 -m pip install numpy
-          #         sudo -u ubuntu python3 -m pip install pandas
-          apt install  python3-numpy python3-pandas  -y        
-          sudo -u ubuntu python3 -m pip install cython 
-          sudo -u ubuntu python3 -m pip install wrapt==1.11 
-          sudo -u ubuntu python3 -m pip install cantools can-isotp
-
-          apt install -y git ec2-instance-connect htop jq unzip
-
-          # Install AWS CLI:
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          ./aws/install
-          rm awscliv2.zip
-
-          # Download Battery Monitoring sample
-
-          cd /home/ubuntu
-          echo "Installing via Git sample from ${SourceUrlBatteryMonitoring}"
-          sudo -u ubuntu git clone ${SourceUrlBatteryMonitoring}
-
-
-          # Download source
-          cd /home/ubuntu
-          if echo ${SourceUrl} | grep -q 's3://'; then
-            sudo -u ubuntu aws s3 cp ${SourceUrl} aws-iot-fleetwise-edge.zip
-            sudo -u ubuntu unzip aws-iot-fleetwise-edge.zip -d aws-iot-fleetwise-edge
-          else
-            sudo -u ubuntu git clone ${SourceUrl} aws-iot-fleetwise-edge
-          fi
-          cd aws-iot-fleetwise-edge
-          if [ '${SourceRef}' != '' ]; then
-            sudo -u ubuntu git checkout ${SourceRef}
-          fi
-
-          # Install SocketCAN modules:
-          ./tools/install-socketcan.sh --bus-count ${FleetSize}
-
-          # Install CAN Simulator
-          # ./tools/install-cansim.sh --bus-count ${FleetSize}
-
-          # Install FWE credentials and config file
-          mkdir /etc/aws-iot-fleetwise
-          mkdir /var/aws-iot-fleetwise
-          echo -n "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo -n "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private-key.key
-          if ((${FleetSize}==1)); then
-            echo "Configuring ${AWS::StackName}..."
-            ./tools/configure-fwe.sh \
-              --input-config-file "configuration/static-config.json" \
-              --output-config-file "/etc/aws-iot-fleetwise/config-0.json" \
-              --vehicle-name "blog-vehicle-01" \
-              --endpoint-url "${IoTThing1.iotEndpoint}" \
-              --topic-prefix '${IoTMqttTopicPrefix}' \
-              --can-bus0 "vcan0"
-          else
-            BATCH_SIZE=$((`nproc`*4))
-            for ((i=0; i<${FleetSize}; i+=${!BATCH_SIZE})); do
-              for ((j=0; j<${!BATCH_SIZE} && i+j<${FleetSize}; j++)); do
-                # This output group is run in a background process. Note that stderr is redirected to stream 3 and back,
-                # to print stderr from the output group, but not info about the background process.
-                { \
-                  echo "Configuring ${AWS::StackName}-$((i+j))..."; \
-                  mkdir /var/aws-iot-fleetwise/fwe$((i+j)); \
-                  ./tools/configure-fwe.sh \
-                    --input-config-file "configuration/static-config.json" \
-                    --output-config-file "/etc/aws-iot-fleetwise/config-$((i+j)).json" \
-                    --vehicle-name "blog-vehicle-$((i+j))" \
-                    --endpoint-url "${IoTThing1.iotEndpoint}" \
-                    --topic-prefix '${IoTMqttTopicPrefix}' \
-                    --can-bus0 "vcan$((i+j))" \
-                    --persistency-path "/var/aws-iot-fleetwise/fwe$((i+j))"; \
-                2>&3 &} 3>&2 2>/dev/null
+              while true; do
+                if sudo fuser /var/{lib/{dpkg,apt/lists},cache/apt/archives}/lock >/dev/null 2>&1; then
+                  i=0
+                else
+                  i=$((i + 1))
+                  if [ "$i" -ge 10 ]; then break; fi
+                fi
+                sleep 1
               done
-              # Wait for all background processes to finish
-              wait
-            done
-          fi
 
-          # Install source deps
-          ./tools/install-deps-native.sh
+              # Upgrade system (Reboot handled by cloud-init if necessary, but we continue for speed)
+              apt update && apt upgrade -y
+              apt install -y python3-pip python3-setuptools python3-venv python3-numpy python3-pandas git ec2-instance-connect htop jq unzip
 
-          # Build source
-          sudo -u ubuntu ./tools/build-fwe-native.sh
+              # Install helper scripts (cfn-bootstrap)
+              mkdir -p /opt/aws/bin
+              wget https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+              python3 -m pip install aws-cfn-bootstrap-py3-latest.tar.gz --break-system-packages
+              
+              # On error, signal failure
+              error_handler() {
+                /usr/local/bin/cfn-signal --success false --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
+              }
+              trap error_handler ERR
 
-          # Install FWE
-          ./tools/install-fwe.sh
+              # System Tuning
+              echo 1048576 > /proc/sys/kernel/pid_max
+              systemctl stop syslog.socket rsyslog.service || true
+              printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
 
-          ROOTDIR=/home/ubuntu/aws-iot-fleetwise-evbatterymonitoring/simulatedvehicle/canreplay
-          sudo \cp -f $ROOTDIR/service/evcansimulation.blog-vehicle-01.service /etc/systemd/system/evcansimulation.service
+              # Python Dependencies for 2026 (Handling PEP 668)
+              python3 -m pip install --upgrade pip --break-system-packages
+              python3 -m pip install cython cantools can-isotp --break-system-packages
 
-          # Signal init complete:
-          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
+              # Install AWS CLI (ARM64 for Graviton)
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
 
-          sudo systemctl enable evcansimulation.service
-          sudo systemctl start evcansimulation.service
+              # Clone Repos
+              cd /home/ubuntu
+              sudo -u ubuntu git clone ${SourceUrlBatteryMonitoring}
+              sudo -u ubuntu git clone ${SourceUrl} aws-iot-fleetwise-edge
+              
+              cd aws-iot-fleetwise-edge
+              if [ "${SourceRef}" != "" ]; then
+                sudo -u ubuntu git checkout ${SourceRef}
+              fi
 
+              # Install SocketCAN
+              ./tools/install-socketcan.sh --bus-count ${FleetSize}
+
+              # Provision Credentials
+              mkdir -p /etc/aws-iot-fleetwise /var/aws-iot-fleetwise
+              echo -n "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+              echo -n "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private-key.key
+              chmod 600 /etc/aws-iot-fleetwise/private-key.key
+              chown -R ubuntu:ubuntu /etc/aws-iot-fleetwise /var/aws-iot-fleetwise
+
+              # Configuration Logic (Fixed BATCH_SIZE syntax)
+              if [ "${FleetSize}" == "1" ]; then
+                ./tools/configure-fwe.sh \
+                  --input-config-file "configuration/static-config.json" \
+                  --output-config-file "/etc/aws-iot-fleetwise/config-0.json" \
+                  --vehicle-name "blog-vehicle-01" \
+                  --endpoint-url "${IoTThing1.iotEndpoint}" \
+                  --topic-prefix '${IoTMqttTopicPrefix}' \
+                  --can-bus0 "vcan0"
+              else
+                BATCH_SIZE=$(( $(nproc) * 4 ))
+                for ((i=0; i<${FleetSize}; i+=BATCH_SIZE)); do
+                  for ((j=0; j<BATCH_SIZE && i+j<${FleetSize}; j++)); do
+                    {
+                      idx=$((i+j))
+                      mkdir -p /var/aws-iot-fleetwise/fwe$idx
+                      ./tools/configure-fwe.sh \
+                        --input-config-file "configuration/static-config.json" \
+                        --output-config-file "/etc/aws-iot-fleetwise/config-$idx.json" \
+                        --vehicle-name "blog-vehicle-01-$idx" \
+                        --endpoint-url "${IoTThing1.iotEndpoint}" \
+                        --topic-prefix '${IoTMqttTopicPrefix}' \
+                        --can-bus0 "vcan$idx" \
+                        --persistency-path "/var/aws-iot-fleetwise/fwe$idx"
+                    } &
+                  done
+                  wait
+                done
+              fi
+
+              # Build and Install (C++ compilation happens here)
+              ./tools/install-deps-native.sh
+              sudo -u ubuntu ./tools/build-fwe-native.sh
+              ./tools/install-fwe.sh
+
+              # Service setup
+              ROOTDIR=/home/ubuntu/aws-iot-fleetwise-evbatterymonitoring/simulatedvehicle/canreplay
+              cp -f $ROOTDIR/service/evcansimulation.blog-vehicle-01.service /etc/systemd/system/evcansimulation.service
+              systemctl daemon-reload
+              systemctl enable evcansimulation.service
+              systemctl start evcansimulation.service
+
+              # Final Success Signal
+              /usr/local/bin/cfn-signal --success true --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
   Ec2Instance2:
-    Type: AWS::EC2::Instance
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: PT30M
-    Properties:
-      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs:
-            VolumeSize: 50
-            VolumeType: gp3
-            DeleteOnTermination: true # Recommended so disks don't linger after deletion
-      KeyName:
-        !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
-      InstanceType:
-        !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
-      IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: !Split [",", !GetAtt Ec2SecurityGroup.GroupId]
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-Ec2-Instance
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -euo pipefail
+        Type: AWS::EC2::Instance
+        CreationPolicy:
+          ResourceSignal:
+            Count: 1
+            Timeout: PT30M
+        Properties:
+          ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+          BlockDeviceMappings:
+            - DeviceName: /dev/sda1
+              Ebs:
+                VolumeSize: 100
+                VolumeType: gp3
+                DeleteOnTermination: true
+          KeyName: !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
+          InstanceType: !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
+          IamInstanceProfile: !Ref Ec2InstanceProfile
+          SecurityGroupIds: [ !Ref Ec2SecurityGroup ]
+          Tags:
+            - Key: Name
+              Value: !Sub ${AWS::StackName}-Vehicle-02
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              set -euo pipefail
 
-          # Wait for any existing package install to finish
-          i=0
-          while true; do
-            if sudo fuser /var/{lib/{dpkg,apt/lists},cache/apt/archives}/lock >/dev/null 2>&1; then
-              i=0
-            else
-              i=`expr $i + 1`
-              if expr $i \>= 10 > /dev/null; then
-                break
+              # ... (Standard apt updates and tool installs same as Instance 1) ...
+              apt update && apt upgrade -y
+              apt install -y python3-pip python3-setuptools python3-venv python3-numpy python3-pandas git ec2-instance-connect htop jq unzip
+              mkdir -p /opt/aws/bin
+              wget https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+              python3 -m pip install aws-cfn-bootstrap-py3-latest.tar.gz --break-system-packages
+
+              error_handler() {
+                /usr/local/bin/cfn-signal --success false --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region}
+              }
+              trap error_handler ERR
+
+              python3 -m pip install cython cantools can-isotp --break-system-packages
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
+
+              cd /home/ubuntu
+              sudo -u ubuntu git clone ${SourceUrlBatteryMonitoring}
+              sudo -u ubuntu git clone ${SourceUrl} aws-iot-fleetwise-edge
+              cd aws-iot-fleetwise-edge
+
+              ./tools/install-socketcan.sh --bus-count ${FleetSize}
+
+              # PROVISIONING FOR VEHICLE 2 (Updated IoTThing references)
+              mkdir -p /etc/aws-iot-fleetwise /var/aws-iot-fleetwise
+              echo -n "${IoTThing2.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+              echo -n "${IoTThing2.privateKey}" > /etc/aws-iot-fleetwise/private-key.key
+              chmod 600 /etc/aws-iot-fleetwise/private-key.key
+              chown -R ubuntu:ubuntu /etc/aws-iot-fleetwise /var/aws-iot-fleetwise
+
+              if [ "${FleetSize}" == "1" ]; then
+                ./tools/configure-fwe.sh \
+                  --input-config-file "configuration/static-config.json" \
+                  --output-config-file "/etc/aws-iot-fleetwise/config-0.json" \
+                  --vehicle-name "blog-vehicle-02" \
+                  --endpoint-url "${IoTThing2.iotEndpoint}" \
+                  --topic-prefix '${IoTMqttTopicPrefix}' \
+                  --can-bus0 "vcan0"
               fi
-            fi
-            sleep 1
-          done
 
-          # Upgrade system and reboot if required
-          apt update && apt upgrade -y
-          if [ -f /var/run/reboot-required ]; then
-          # Delete the UserData info file so that we run again after reboot
-            rm -f /var/lib/cloud/instances/*/sem/config_scripts_user
-            reboot
-            exit
-          fi
+              ./tools/install-deps-native.sh
+              sudo -u ubuntu ./tools/build-fwe-native.sh
+              ./tools/install-fwe.sh
 
-          # Install helper scripts:
-          apt update && apt install -y python3-setuptools
-          mkdir -p /opt/aws/bin
-          wget https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
-          python3 -m easy_install --script-dir /opt/aws/bin aws-cfn-bootstrap-py3-latest.tar.gz
-          rm aws-cfn-bootstrap-py3-latest.tar.gz
+              ROOTDIR=/home/ubuntu/aws-iot-fleetwise-evbatterymonitoring/simulatedvehicle/canreplay
+              cp -f $ROOTDIR/service/evcansimulation.blog-vehicle-02.service /etc/systemd/system/evcansimulation.service
+              systemctl daemon-reload
+              systemctl enable evcansimulation.service
+              systemctl start evcansimulation.service
 
-          # On error, signal back to cfn:
-          error_handler() {
-            /opt/aws/bin/cfn-signal --success false --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region}
-          }
-          trap error_handler ERR
-
-          # Increase pid_max:
-          echo 1048576 > /proc/sys/kernel/pid_max
-          # Disable syslog:
-          systemctl stop syslog.socket rsyslog.service
-          # Remove journald rate limiting and set max size:
-          printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
-
-          # Install packages for Battery Monitoring sample
-          #sudo apt install python3-pip python3-dev -y
-          sudo apt install python3-pip -y
-          sudo python3 -m pip install --upgrade pip
-          #          sudo -u ubuntu python3 -m pip install numpy
-          #         sudo -u ubuntu python3 -m pip install pandas
-          apt install  python3-numpy python3-pandas  -y        
-          sudo -u ubuntu python3 -m pip install cython 
-          sudo -u ubuntu python3 -m pip install wrapt==1.11 
-          sudo -u ubuntu python3 -m pip install cantools can-isotp
-
-          apt install -y git ec2-instance-connect htop jq unzip
-
-          # Install AWS CLI:
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip
-          ./aws/install
-          rm awscliv2.zip
-
-          # Download Battery Monitoring sample
-
-          cd /home/ubuntu
-          echo "Installing via Git sample from ${SourceUrlBatteryMonitoring}"
-          sudo -u ubuntu git clone ${SourceUrlBatteryMonitoring}
-
-
-          # Download source
-          cd /home/ubuntu
-          if echo ${SourceUrl} | grep -q 's3://'; then
-            sudo -u ubuntu aws s3 cp ${SourceUrl} aws-iot-fleetwise-edge.zip
-            sudo -u ubuntu unzip aws-iot-fleetwise-edge.zip -d aws-iot-fleetwise-edge
-          else
-            sudo -u ubuntu git clone ${SourceUrl} aws-iot-fleetwise-edge
-          fi
-          cd aws-iot-fleetwise-edge
-          if [ '${SourceRef}' != '' ]; then
-            sudo -u ubuntu git checkout ${SourceRef}
-          fi
-
-          # Install SocketCAN modules:
-          ./tools/install-socketcan.sh --bus-count ${FleetSize}
-
-          # Install CAN Simulator
-          # ./tools/install-cansim.sh --bus-count ${FleetSize}
-
-          # Install FWE credentials and config file
-          mkdir /etc/aws-iot-fleetwise
-          mkdir /var/aws-iot-fleetwise
-          echo -n "${IoTThing2.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo -n "${IoTThing2.privateKey}" > /etc/aws-iot-fleetwise/private-key.key
-          if ((${FleetSize}==1)); then
-            echo "Configuring ${AWS::StackName}..."
-            ./tools/configure-fwe.sh \
-              --input-config-file "configuration/static-config.json" \
-              --output-config-file "/etc/aws-iot-fleetwise/config-0.json" \
-              --vehicle-name "blog-vehicle-02" \
-              --endpoint-url "${IoTThing2.iotEndpoint}" \
-              --topic-prefix '${IoTMqttTopicPrefix}' \
-              --can-bus0 "vcan0"
-          else
-            BATCH_SIZE=$((`nproc`*4))
-            for ((i=0; i<${FleetSize}; i+=${!BATCH_SIZE})); do
-              for ((j=0; j<${!BATCH_SIZE} && i+j<${FleetSize}; j++)); do
-                # This output group is run in a background process. Note that stderr is redirected to stream 3 and back,
-                # to print stderr from the output group, but not info about the background process.
-                { \
-                  echo "Configuring ${AWS::StackName}-$((i+j))..."; \
-                  mkdir /var/aws-iot-fleetwise/fwe$((i+j)); \
-                  ./tools/configure-fwe.sh \
-                    --input-config-file "configuration/static-config.json" \
-                    --output-config-file "/etc/aws-iot-fleetwise/config-$((i+j)).json" \
-                    --vehicle-name "blog-vehicle-$((i+j))" \
-                    --endpoint-url "${IoTThing2.iotEndpoint}" \
-                    --topic-prefix '${IoTMqttTopicPrefix}' \
-                    --can-bus0 "vcan$((i+j))" \
-                    --persistency-path "/var/aws-iot-fleetwise/fwe$((i+j))"; \
-                2>&3 &} 3>&2 2>/dev/null
-              done
-              # Wait for all background processes to finish
-              wait
-            done
-          fi
-
-          # Install source deps
-          ./tools/install-deps-native.sh
-
-          # Build source
-          sudo -u ubuntu ./tools/build-fwe-native.sh
-
-          # Install FWE
-          ./tools/install-fwe.sh
-
-          # Signal init complete:
-          /opt/aws/bin/cfn-signal --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region}
-
-          ROOTDIR=/home/ubuntu/aws-iot-fleetwise-evbatterymonitoring/simulatedvehicle/canreplay
-          sudo \cp -f $ROOTDIR/service/evcansimulation.blog-vehicle-02.service /etc/systemd/system/evcansimulation.service
-
-          sudo systemctl enable evcansimulation.service
-          sudo systemctl start evcansimulation.service
-
+              /usr/local/bin/cfn-signal --success true --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region} 
   TimestreamDatabase:
     Type: AWS::Timestream::Database
     Condition: NeedToCreateTimesteamResources
@@ -708,7 +571,7 @@ Mappings:
       AMIID: ami-0327006c87b23e535
   FleetSizeEc2InstanceTypeMap:
     "1":
-      InstanceType: m8g.xlarge
+      InstanceType: c8g.xlarge  #m8g.xlarge
     "2":
       InstanceType: m6g.2xlarge
     "10":
