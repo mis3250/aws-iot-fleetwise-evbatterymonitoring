@@ -139,42 +139,69 @@ Resources:
           SecurityGroupIds: [ !Ref Ec2SecurityGroup ]
           Tags:
             - Key: Name
-              Value: !Sub ${AWS::StackName}-Vehicle-01
-  
+              Value: !Sub ${AWS::StackName}-Vehicle-01       
+
           UserData:
             Fn::Base64: !Sub |
-              #!/bin/bash -xe
-              # 1. Update and install basic dependencies
-              apt-get update -y
-              apt-get install -y python3-pip python3-setuptools binutils setup-pollard-can-utils
-              
-              # 2. Fix for Ubuntu 24.04: Map modern clang-tidy to version 12
-              # The FleetWise script hard-codes 'clang-tidy-12', which doesn't exist in 24.04
-              apt-get install -y clang-tidy
-              ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12
-              ln -s /usr/bin/clang-format /usr/bin/clang-format-12
+              #!/bin/bash
+              # -x: print commands, -e: exit on error
+              set -xe
 
-              # 3. Install AWS CLI (ARM64)
+              # 1. Resilience: Retry loop for apt-get (handles network timeouts)
+              for i in {1..5}; do
+                apt-get update -y && break || (echo "Retry $i..." && sleep 20)
+              done
+
+              # 2. Install Verified 24.04 Packages
+              # Note: setup-pollard-can-utils is replaced by standard can-utils
+              for i in {1..5}; do
+                apt-get install -y \
+                  python3-pip \
+                  python3-setuptools \
+                  binutils \
+                  can-utils \
+                  clang-tidy \
+                  git \
+                  jq \
+                  unzip \
+                  htop && break || (echo "Retry $i..." && sleep 20)
+              done
+
+              # 3. Compiler Version Aliasing (The "Magic Trick")
+              # Maps modern clang (v18) to v12 to keep legacy build scripts happy
+              ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
+              ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+
+              # 4. Install AWS CLI (Aarch64 for Graviton4)
               curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-              unzip awscliv2.zip
-              ./aws/install
+              unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
 
-              # 4. Clone the Edge Agent and Patch the dependency script
+              # 5. Build Environment Setup
               cd /home/ubuntu
-              git clone https://github.com/aws/aws-iot-fleetwise-edge.git
+              # Cloning before running scripts ensures directories exist
+              sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
               cd aws-iot-fleetwise-edge
-              
-              # This line replaces any hardcoded '12' versions in the script with the system default
+
+              # Patch the dependency script to remove version hardcoding
               sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
               sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
 
-              # 5. Run the build as the ubuntu user
+              # 6. Initialize Virtual CAN & Dependencies
+              # Ubuntu 24.04 requires --break-system-packages for global pip
+              ./tools/install-socketcan.sh --bus-count 1
               ./tools/install-deps-native.sh
-              sudo -u ubuntu ./tools/build-fwe-native.sh
 
-              # 6. Signal Success to CloudFormation
-              /usr/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource VehicleNode01 --region ${AWS::Region}  
-       
+              # 7. Heavy Compilation (5-10 minutes)
+              sudo -u ubuntu ./tools/build-fwe-native.sh
+              ./tools/install-fwe.sh
+
+              # 8. Success Signal
+              # Ensures CloudFormation turns Green only AFTER compilation finishes
+              /usr/local/bin/cfn-signal --success true \
+                --stack ${AWS::StackName} \
+                --resource ${AWS::ElementName} \
+                --region ${AWS::Region}
+
  
   Ec2Instance2:
         Type: AWS::EC2::Instance
@@ -444,7 +471,6 @@ Resources:
                   - !Sub arn:aws:iot:${IoTCoreRegion}:${AWS::AccountId}:thing/*
                   - !Sub arn:aws:iot:${IoTCoreRegion}:${AWS::AccountId}:cert/*
                   - !Sub arn:aws:iot:${IoTCoreRegion}:${AWS::AccountId}:policy/*
-
 Mappings:
   AMIRegionMap:
     us-east-1:
