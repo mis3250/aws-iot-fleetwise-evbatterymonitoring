@@ -538,8 +538,9 @@ Resources:
                   - !Sub arn:aws:iot:${IoTCoreRegion}:${AWS::AccountId}:thing/*
                   - !Sub arn:aws:iot:${IoTCoreRegion}:${AWS::AccountId}:cert/*
                   - !Sub arn:aws:iot:${IoTCoreRegion}:${AWS::AccountId}:policy/*
+
 Mappings:
-  # Ubuntu 18.04 arm64 AMIs
+  # Ubuntu 18.04 arm64 AMIs, us-east-1 ubuntu 24.04
   AMIRegionMap:
     ap-northeast-1:
       AMIID: ami-078fe86fa4c333481
@@ -568,7 +569,7 @@ Mappings:
     sa-east-1:
       AMIID: ami-0bd03f2c1034d9845
     us-east-1:
-      AMIID: ami-08353a25e80beea3e
+      AMIID: ami-0bc0f64eea5d47edf # Ubuntu 24.04 Arm64 Verified
     us-east-2:
       AMIID: ami-026141f3d5c6d2d0c
     us-west-1:
