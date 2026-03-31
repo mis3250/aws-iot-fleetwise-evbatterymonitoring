@@ -192,32 +192,70 @@ Resources:
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
       KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
-      
+
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          # Exit on error and print commands to /var/log/cloud-init-output.log
           set -xe
+          
+          # 1. Environment & Python "PEP 668" Noble Fix
           export DEBIAN_FRONTEND=noninteractive
           export PIP_BREAK_SYSTEM_PACKAGES=1
-          
-          # This ensures the PEP 668 error never happens, even under sudo
-          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
+          # This removes the block that prevents pip from installing globally, even under sudo
+          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED || true
 
-          # 1. Noble Fixes (Packages & Symlinks)
+          # 2. Install Core Dependencies
           apt-get update -y
           apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip htop \
                               libprotobuf-dev protobuf-compiler libboost-all-dev libssl-dev \
-                              libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format
+                              libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format \
+                              libsnappy-dev parallel doxygen graphviz
           
-          # Fix for FleetWise script dependencies
+          # Fix for FleetWise scripts expecting specific versioned tool names
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
 
-          # ... rest of your script ...    
-      
+          # 3. Install AWS CLI (ARM64 version for c8g)
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
- 
- 
+          # 4. Clone and Patch AWS IoT FleetWise Edge
+          cd /home/ubuntu
+          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
+          cd aws-iot-fleetwise-edge
+
+          # Patch scripts to use generic clang names and bypass Ubuntu 24.04 alternatives issues
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
+          sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
+          
+          # 5. Build Process
+          ./tools/install-socketcan.sh --bus-count 1
+          sudo ./tools/install-deps-native.sh
+          sudo -u ubuntu ./tools/build-fwe-native.sh
+
+          # 6. Deploy Certificates from CloudFormation Custom Resource
+          mkdir -p /etc/aws-iot-fleetwise
+          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
+
+          # 7. Configure and Install FWE Service
+          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
+            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
+            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
+            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
+          
+          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
+          
+          # 8. Signal Success to CloudFormation
+          /usr/local/bin/aws cloudformation signal-resource \
+            --stack-name ${AWS::StackName} \
+            --logical-resource-id Ec2Instance1 \
+            --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
+            --status SUCCESS \
+            --region ${AWS::Region}      
+
   Ec2Instance2:
     Type: AWS::EC2::Instance
     Condition: IsFleetSize2
@@ -233,25 +271,67 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          # Exit on error and print commands to /var/log/cloud-init-output.log
           set -xe
+          
+          # 1. Environment & Python "PEP 668" Noble Fix
           export DEBIAN_FRONTEND=noninteractive
           export PIP_BREAK_SYSTEM_PACKAGES=1
-          
-          # This ensures the PEP 668 error never happens, even under sudo
-          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
+          # This removes the block that prevents pip from installing globally, even under sudo
+          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED || true
 
-          # 1. Noble Fixes (Packages & Symlinks)
+          # 2. Install Core Dependencies
           apt-get update -y
           apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip htop \
                               libprotobuf-dev protobuf-compiler libboost-all-dev libssl-dev \
-                              libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format
+                              libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format \
+                              libsnappy-dev parallel doxygen graphviz
           
-          # Fix for FleetWise script dependencies
+          # Fix for FleetWise scripts expecting specific versioned tool names
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
 
-          # ... rest of your script ...
+          # 3. Install AWS CLI (ARM64 version for c8g)
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
+          # 4. Clone and Patch AWS IoT FleetWise Edge
+          cd /home/ubuntu
+          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
+          cd aws-iot-fleetwise-edge
+
+          # Patch scripts to use generic clang names and bypass Ubuntu 24.04 alternatives issues
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
+          sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
+          
+          # 5. Build Process
+          ./tools/install-socketcan.sh --bus-count 1
+          sudo ./tools/install-deps-native.sh
+          sudo -u ubuntu ./tools/build-fwe-native.sh
+
+          # 6. Deploy Certificates from CloudFormation Custom Resource
+          mkdir -p /etc/aws-iot-fleetwise
+          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
+
+          # 7. Configure and Install FWE Service
+          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
+            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
+            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
+            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
+          
+          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
+          
+          # 8. Signal Success to CloudFormation
+          /usr/local/bin/aws cloudformation signal-resource \
+            --stack-name ${AWS::StackName} \
+            --logical-resource-id Ec2Instance1 \
+            --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
+            --status SUCCESS \
+            --region ${AWS::Region} 
+ 
+ 
 Outputs:
   Ec2Instance1PublicIp:
     Description: "Public IP address of the first vehicle simulation"
