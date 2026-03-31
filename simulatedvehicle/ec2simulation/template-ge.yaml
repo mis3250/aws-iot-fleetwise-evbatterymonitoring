@@ -79,7 +79,8 @@ Resources:
               - Effect: Allow
                 Action: ["logs:*", "iot:*"]
                 Resource: "*"
-
+# lambda triigered by actions on cloudformation
+ 
   CreateThingFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -92,10 +93,13 @@ Resources:
           import cfnresponse, boto3, json
           def handler(event, context):
               responseData = {}
+              iot = boto3.client('iot', region_name='${AWS::Region}')
               try:
-                  iot = boto3.client('iot', region_name='${AWS::Region}')
                   thing_name = event['ResourceProperties']['ThingName']
+                  policy_name = thing_name + '-policy'
+
                   if event['RequestType'] == 'Create':
+                      # --- CREATE LOGIC ---
                       keys = iot.create_keys_and_certificate(setAsActive=True)
                       cert_arn = keys['certificateArn']
                       responseData.update({
@@ -104,15 +108,46 @@ Resources:
                           'iotEndpoint': iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
                       })
                       policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["iot:*"], "Resource": ["*"]}]}
-                      policy_name = thing_name + '-policy'
                       iot.create_policy(policyName=policy_name, policyDocument=json.dumps(policy))
                       iot.create_thing(thingName=thing_name)
                       iot.attach_policy(policyName=policy_name, target=cert_arn)
                       iot.attach_thing_principal(thingName=thing_name, principal=cert_arn)
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
-              except Exception as e:
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
 
+                  elif event['RequestType'] == 'Delete':
+                      # --- DELETE LOGIC ---
+                      try:
+                          # 1. Find all certificates (principals) attached to this thing
+                          principals = iot.list_thing_principals(thingName=thing_name).get('principals', [])
+                          for cert_arn in principals:
+                              # 2. Detach and cleanup each certificate
+                              iot.detach_thing_principal(thingName=thing_name, principal=cert_arn)
+                              try:
+                                  iot.detach_policy(policyName=policy_name, target=cert_arn)
+                              except: pass
+                              
+                              cert_id = cert_arn.split('/')[-1]
+                              iot.update_certificate(certificateId=cert_id, newStatus='INACTIVE')
+                              iot.delete_certificate(certificateId=cert_id, forceDelete=True)
+                          
+                          # 3. Delete the Thing and the Policy
+                          iot.delete_thing(thingName=thing_name)
+                          iot.delete_policy(policyName=policy_name)
+                      except Exception as e:
+                          print(f"Cleanup warning: {e}")
+                      
+                      # Always send SUCCESS on delete so the stack isn't held hostage
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
+                  elif event['RequestType'] == 'Update':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
+              except Exception as e:
+                  print(f"Error: {e}")
+                  # If we fail on Create, signal failure. If we fail on Delete, signal success anyway.
+                  status = cfnresponse.FAILED if event['RequestType'] != 'Delete' else cfnresponse.SUCCESS
+                  cfnresponse.send(event, context, status, {"Error": str(e)})  
+  
   IoTThing1:
     Type: Custom::IoTThing
     Properties:
@@ -249,6 +284,7 @@ Resources:
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} \
             --logical-resource-id Ec2Instance2 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
             --status SUCCESS --region ${AWS::Region}
+
 Outputs:
   Ec2Instance1PublicIp:
     Description: "Public IP address of the first vehicle simulation"
