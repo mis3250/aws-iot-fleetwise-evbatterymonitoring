@@ -29,6 +29,26 @@ Mappings:
     eu-west-1: {AMIID: ami-0568015f8e029497e}
 
 Resources:
+  Ec2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Instance security group
+  Ec2SecurityGroupSshIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow inbound SSH access
+      GroupId: !GetAtt Ec2SecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: "0.0.0.0/0"
+  Ec2SecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow access in same security group
+      GroupId: !GetAtt Ec2SecurityGroup.GroupId
+      IpProtocol: -1
+      SourceSecurityGroupId: !GetAtt Ec2SecurityGroup.GroupId
   # --- DATABASE LAYER ---
   TimestreamDatabase:
     Type: AWS::Timestream::Database
@@ -42,7 +62,7 @@ Resources:
       DatabaseName: !Ref TimestreamDatabase
       RetentionProperties:
         MemoryStoreRetentionPeriodInHours: "24"
-        MagneticStoreRetentionPeriodInDays: "7"
+        MagneticStoreRetentionPeriodInDays: "1"
 
   # --- PROVISIONING LAYER (Lambda) ---
   LambdaExecutionRole:
@@ -97,14 +117,14 @@ Resources:
     Type: Custom::IoTThing
     Properties:
       ServiceToken: !GetAtt CreateThingFunction.Arn
-      ThingName: !Sub ${AWS::StackName}-vehicle-01
+      ThingName: blog-vehicle-01
 
   IoTThing2:
     Type: Custom::IoTThing
     Condition: IsFleetSize2
     Properties:
       ServiceToken: !GetAtt CreateThingFunction.Arn
-      ThingName: !Sub ${AWS::StackName}-vehicle-02
+      ThingName: blog-vehicle-02
 
   # --- COMPUTE LAYER (EC2) ---
   Ec2ServiceRole:
@@ -133,6 +153,7 @@ Resources:
       ResourceSignal: {Count: 1, Timeout: PT30M}
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      SecurityGroupIds: !Split [",", !GetAtt Ec2SecurityGroup.GroupId]
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
       KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
@@ -191,6 +212,7 @@ Resources:
       ResourceSignal: {Count: 1, Timeout: PT30M}
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      SecurityGroupIds: !Split [",", !GetAtt Ec2SecurityGroup.GroupId]
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
       KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
