@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: AWS IoT FleetWise Electric Vehicle Simulation
+Description: AWS IoT FleetWise Electric Vehicle Simulation - Corrected Dependencies
 
 Globals:
   Function:
@@ -54,29 +54,24 @@ Conditions:
   KeyPairSpecifiedCondition: !Not [!Equals [!Ref Ec2KeyPair, ""]]
   NeedToCreateTimestreamResources: !Equals [!Ref SkipTimestreamResourcesCreation, "no"]
   IsFleetSize2: !Equals [!Ref FleetSize, "2"]
+  # Composite conditions for Outputs
+  ShowInstance1SSH: !And [!Condition KeyPairSpecifiedCondition]
+  ShowInstance2Outputs: !And [!Condition IsFleetSize2]
+  ShowInstance2SSH: !And [!Condition IsFleetSize2, !Condition KeyPairSpecifiedCondition]
 
 Mappings:
   AMIRegionMap:
-    us-east-1:
-      AMIID: ami-0bc0f64eea5d47edf
-    us-east-2:
-      AMIID: ami-0275817a3a9018e6c
-    us-west-2:
-      AMIID: ami-047a505f037be3a7d
-    eu-central-1:
-      AMIID: ami-043516556e409f874
-    eu-west-1:
-      AMIID: ami-0568015f8e029497e
-    ap-northeast-1:
-      AMIID: ami-002d01859666c8916
-    ap-southeast-1:
-      AMIID: ami-0143896504a372173
+    us-east-1: {AMIID: ami-0bc0f64eea5d47edf}
+    us-east-2: {AMIID: ami-0275817a3a9018e6c}
+    us-west-2: {AMIID: ami-047a505f037be3a7d}
+    eu-central-1: {AMIID: ami-043516556e409f874}
+    eu-west-1: {AMIID: ami-0568015f8e029497e}
+    ap-northeast-1: {AMIID: ami-002d01859666c8916}
+    ap-southeast-1: {AMIID: ami-0143896504a372173}
       
   FleetSizeEc2InstanceTypeMap:
-    "1":
-      InstanceType: c8g.xlarge
-    "2":
-      InstanceType: m6g.2xlarge
+    "1": {InstanceType: c8g.xlarge}
+    "2": {InstanceType: m6g.2xlarge}
 
 Resources:
   Ec2SecurityGroup:
@@ -110,8 +105,7 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
-            Principal:
-              Service: ec2.amazonaws.com
+            Principal: {Service: ec2.amazonaws.com}
             Action: sts:AssumeRole
       Policies:
         - PolicyName: !Sub ${AWS::StackName}-EC2-ServicePolicy
@@ -119,16 +113,13 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - "s3:List*"
-                  - "s3:Get*"
+                Action: ["s3:List*", "s3:Get*"]
                 Resource: "arn:aws:s3:::*"
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
-      Roles:
-        - !Ref Ec2ServiceRole
+      Roles: [!Ref Ec2ServiceRole]
 
   Ec2Instance1:
     Type: AWS::EC2::Instance
@@ -138,19 +129,14 @@ Resources:
         Timeout: PT30M
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      MetadataOptions:
-        HttpTokens: required
-        HttpPutResponseHopLimit: 1
+      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 1}
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
-          Ebs:
-            VolumeSize: 100
-            VolumeType: gp3
-            DeleteOnTermination: true
+          Ebs: {VolumeSize: 100, VolumeType: gp3, DeleteOnTermination: true}
       KeyName: !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
       InstanceType: !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
       IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: [ !Ref Ec2SecurityGroup ]
+      SecurityGroupIds: [!Ref Ec2SecurityGroup]
       Tags:
         - Key: Name
           Value: !Sub ${AWS::StackName}-Vehicle-01       
@@ -158,12 +144,8 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -xe
-          for i in {1..5}; do
-            apt-get update -y && break || (echo "Retry $i..." && sleep 20)
-          done
-          for i in {1..5}; do
-            apt-get install -y python3-pip python3-setuptools binutils can-utils clang-tidy git jq unzip htop && break || (echo "Retry $i..." && sleep 20)
-          done
+          apt-get update -y
+          apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip clang-tidy htop
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
@@ -188,18 +170,14 @@ Resources:
         Timeout: PT30M
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      MetadataOptions:
-        HttpTokens: required
+      MetadataOptions: {HttpTokens: required}
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
-          Ebs:
-            VolumeSize: 100
-            VolumeType: gp3
-            DeleteOnTermination: true
+          Ebs: {VolumeSize: 100, VolumeType: gp3, DeleteOnTermination: true}
       KeyName: !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
       InstanceType: !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
       IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: [ !Ref Ec2SecurityGroup ]
+      SecurityGroupIds: [!Ref Ec2SecurityGroup]
       Tags:
         - Key: Name
           Value: !Sub ${AWS::StackName}-Vehicle-02
@@ -247,52 +225,27 @@ Resources:
       Timeout: 300
       Code:
         ZipFile: !Sub |
-          import sys
-          import cfnresponse
-          import boto3
+          import sys, cfnresponse, boto3, json, logging
           from botocore.exceptions import ClientError
-          import json
-          import logging
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
-
           def handler(event, context):
               responseData = {}
               try:
-                  logger.info('Received event: {}'.format(json.dumps(event)))
+                  logger.info('Event: {}'.format(json.dumps(event)))
                   result = cfnresponse.FAILED
-                  iotCoreEndpointUrl=event['ResourceProperties']['IoTCoreEndpointUrl']
-                  iotCoreRegion=event['ResourceProperties']['IoTCoreRegion']
-                  client = boto3.client(
-                      'iot',
-                      endpoint_url=None if iotCoreEndpointUrl=='' else iotCoreEndpointUrl,
-                      region_name=iotCoreRegion)
-                  inputThingName=event['ResourceProperties']['ThingName']
-                  fleetSize=int(event['ResourceProperties']['FleetSize'])
+                  iot = boto3.client('iot', region_name=event['ResourceProperties']['IoTCoreRegion'])
+                  thing_name = event['ResourceProperties']['ThingName']
                   if event['RequestType'] == 'Create':
-                      response = client.create_keys_and_certificate(setAsActive=True)
-                      certArn = response['certificateArn']
-                      responseData['certificateId'] = response['certificateId']
-                      responseData['certificatePem'] = response['certificatePem']
-                      responseData['privateKey'] = response['keyPair']['PrivateKey']
-                      
-                      policyDocument = {
-                          "Version": "2012-10-17",
-                          "Statement": [{
-                              "Effect": "Allow",
-                              "Action": ["iot:Connect", "iot:Subscribe", "iot:Publish", "iot:Receive"],
-                              "Resource": ["*"]
-                          }]
-                      }
-                      client.create_policy(policyName=inputThingName+'-policy', policyDocument=json.dumps(policyDocument))
-                      
-                      for i in range(fleetSize):
-                          thingName = inputThingName+("" if fleetSize==1 else "-"+str(i))
-                          client.create_thing(thingName=thingName)
-                          client.attach_policy(policyName=inputThingName+'-policy', target=certArn)
-                          client.attach_thing_principal(thingName=thingName, principal=certArn)
-                      
-                      responseData['iotEndpoint'] = client.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
+                      keys = iot.create_keys_and_certificate(setAsActive=True)
+                      cert_arn = keys['certificateArn']
+                      responseData.update({'certificateId': keys['certificateId'], 'certificatePem': keys['certificatePem'], 'privateKey': keys['keyPair']['PrivateKey']})
+                      policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["iot:*"], "Resource": ["*"]}]}
+                      iot.create_policy(policyName=thing_name+'-policy', policyDocument=json.dumps(policy))
+                      iot.create_thing(thingName=thing_name)
+                      iot.attach_policy(policyName=thing_name+'-policy', target=cert_arn)
+                      iot.attach_thing_principal(thingName=thing_name, principal=cert_arn)
+                      responseData['iotEndpoint'] = iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
                       result = cfnresponse.SUCCESS
                   elif event['RequestType'] in ['Update', 'Delete']:
                       result = cfnresponse.SUCCESS
@@ -325,25 +278,14 @@ Resources:
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: sts:AssumeRole
+        Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: "sts:AssumeRole"}]
       Policies:
-        - PolicyName: !Sub ${AWS::StackName}-Lambda-ExecutionPolicy
+        - PolicyName: !Sub ${AWS::StackName}-Lambda-Policy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: arn:aws:logs:*:*:*
-              - Effect: Allow
-                Action:
-                  - iot:*
+                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "iot:*"]
                 Resource: "*"
 
 Outputs:
@@ -352,16 +294,16 @@ Outputs:
     Value: !GetAtt Ec2Instance1.PublicIp
 
   Ec2Instance1SSH:
-    Condition: KeyPairSpecifiedCondition
-    Description: "EC2 instance 1 SSH access command"
+    Condition: ShowInstance1SSH
+    Description: "EC2 instance 1 SSH command"
     Value: !Sub ssh -i ~/${Ec2KeyPair}.pem ubuntu@${Ec2Instance1.PublicIp}
-    
+
   Ec2Instance2PublicIp:
-    Condition: KeyPairSpecifiedCondition
+    Condition: ShowInstance2Outputs
     Description: "EC2 instance 2 public IP address"
     Value: !GetAtt Ec2Instance2.PublicIp
 
   Ec2Instance2SSH:
-    Condition: KeyPairSpecifiedCondition
-    Description: "EC2 instance 2 SSH access command"
+    Condition: ShowInstance2SSH
+    Description: "EC2 instance 2 SSH command"
     Value: !Sub ssh -i ~/${Ec2KeyPair}.pem ubuntu@${Ec2Instance2.PublicIp}
