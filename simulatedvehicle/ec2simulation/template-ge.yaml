@@ -1,56 +1,24 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: AWS IoT FleetWise Electric Vehicle Simulation - Final Verified Version
-
-Globals:
-  Function:
-    Timeout: 3
+Description: AWS IoT FleetWise EV Simulation - Multi-Vehicle Team Version (Ubuntu 24.04)
 
 Parameters:
-  SourceUrl:
-    Description: Source Git clone URL for AWS IoT FleetWise Edge repo
-    Type: String
-    Default: https://github.com/aws/aws-iot-fleetwise-edge.git
-  SourceRef:
-    Description: Source Git branch, tag or commit ID
-    Type: String
-    Default: "v1.3.2"
   Ec2KeyPair:
-    Description: Name of SSH key pair (leave blank for none)
     Type: String
+    Description: Name of SSH key pair (leave blank for none)
     Default: ""
   FleetSize:
-    Description: "Number of vehicles to create"
     Type: String
     Default: "1"
     AllowedValues: ["1", "2"]
   IoTCoreRegion:
-    Description: "Region for IoT Things."
     Type: String
     Default: "us-east-1"
-    AllowedValues: 
-      - "us-east-1"
-      - "us-east-2"
-      - "us-west-2"
-      - "eu-central-1"
-      - "eu-west-1"
-      - "ap-northeast-1"
-      - "ap-southeast-1"
-  IoTCoreEndpointUrl:
-    Description: "Endpoint URL for IoT Core (leave blank for automatic)"
-    Type: String
-    Default: ""
-  SkipTimestreamResourcesCreation:
-    Description: "Skip creation of IoT Timestream Resources"
-    Type: String
-    Default: "no"
+    AllowedValues: ["us-east-1", "us-east-2", "us-west-2", "eu-central-1", "eu-west-1"]
 
 Conditions:
-  KeyPairSpecifiedCondition: !Not [!Equals [!Ref Ec2KeyPair, ""]]
-  NeedToCreateTimestreamResources: !Equals [!Ref SkipTimestreamResourcesCreation, "no"]
   IsFleetSize2: !Equals [!Ref FleetSize, "2"]
-  # Fixed: ShowInstance2SSH now has exactly two conditions for !And
-  ShowInstance2SSH: !And [!Condition IsFleetSize2, !Condition KeyPairSpecifiedCondition]
+  KeyPairSpecified: !Not [!Equals [!Ref Ec2KeyPair, ""]]
 
 Mappings:
   AMIRegionMap:
@@ -59,158 +27,38 @@ Mappings:
     us-west-2: {AMIID: ami-047a505f037be3a7d}
     eu-central-1: {AMIID: ami-043516556e409f874}
     eu-west-1: {AMIID: ami-0568015f8e029497e}
-    ap-northeast-1: {AMIID: ami-002d01859666c8916}
-    ap-southeast-1: {AMIID: ami-0143896504a372173}
-      
-  FleetSizeEc2InstanceTypeMap:
-    "1": {InstanceType: c8g.xlarge}
-    "2": {InstanceType: m6g.2xlarge}
 
 Resources:
-  Ec2SecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Instance security group
-
-  Ec2SecurityGroupSshIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow inbound SSH access
-      GroupId: !GetAtt Ec2SecurityGroup.GroupId
-      IpProtocol: tcp
-      FromPort: 22
-      ToPort: 22
-      CidrIp: "0.0.0.0/0"
-
-  Ec2SecurityGroupSelfIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      Description: Allow access in same security group
-      GroupId: !GetAtt Ec2SecurityGroup.GroupId
-      IpProtocol: -1
-      SourceSecurityGroupId: !GetAtt Ec2SecurityGroup.GroupId
-
-  Ec2ServiceRole:
-    Type: AWS::IAM::Role
-    DeletionPolicy: Retain
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal: {Service: ec2.amazonaws.com}
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: !Sub ${AWS::StackName}-EC2-Policy
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action: ["s3:List*", "s3:Get*", "iot:*"]
-                Resource: "*"
-
-  Ec2InstanceProfile:
-    Type: AWS::IAM::InstanceProfile
-    Properties:
-      Roles: [!Ref Ec2ServiceRole]
-
-  Ec2Instance1:
-    Type: AWS::EC2::Instance
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: PT30M
-    Properties:
-      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      MetadataOptions: {HttpTokens: required, HttpPutResponseHopLimit: 1}
-      BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs: {VolumeSize: 100, VolumeType: gp3, DeleteOnTermination: true}
-      KeyName: !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
-      InstanceType: !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
-      IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: [!Ref Ec2SecurityGroup]
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-Vehicle-01       
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -xe
-          apt-get update -y
-          apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip clang-tidy htop
-          ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
-          ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
-          cd /home/ubuntu
-          sudo -u ubuntu git clone ${SourceUrl}
-          cd aws-iot-fleetwise-edge
-          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
-          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
-          ./tools/install-socketcan.sh --bus-count 1
-          ./tools/install-deps-native.sh
-          sudo -u ubuntu ./tools/build-fwe-native.sh
-          ./tools/install-fwe.sh
-          # Use fallback path for signal if not in path
-          SIGNAL_BIN=$(which cfn-signal || echo "/usr/local/bin/cfn-signal")
-          $SIGNAL_BIN --success true --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
-
-  Ec2Instance2:
-    Type: AWS::EC2::Instance
-    Condition: IsFleetSize2
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: PT30M
-    Properties:
-      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      MetadataOptions: {HttpTokens: required}
-      BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs: {VolumeSize: 100, VolumeType: gp3, DeleteOnTermination: true}
-      KeyName: !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
-      InstanceType: !FindInMap [FleetSizeEc2InstanceTypeMap, !Ref "FleetSize", InstanceType]
-      IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: [!Ref Ec2SecurityGroup]
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-Vehicle-02
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          set -xe
-          apt-get update -y
-          apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip clang-tidy
-          ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
-          ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
-          cd /home/ubuntu
-          sudo -u ubuntu git clone ${SourceUrl}
-          cd aws-iot-fleetwise-edge
-          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
-          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
-          ./tools/install-deps-native.sh
-          sudo -u ubuntu ./tools/build-fwe-native.sh
-          SIGNAL_BIN=$(which cfn-signal || echo "/usr/local/bin/cfn-signal")
-          $SIGNAL_BIN --success true --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region}
-
+  # --- DATABASE LAYER ---
   TimestreamDatabase:
     Type: AWS::Timestream::Database
-    Condition: NeedToCreateTimestreamResources
     Properties:
       DatabaseName: FleetWiseDatabase
 
   TimestreamTable:
     Type: AWS::Timestream::Table
-    Condition: NeedToCreateTimestreamResources
     Properties:
       TableName: FleetWiseTable
       DatabaseName: !Ref TimestreamDatabase
       RetentionProperties:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
+
+  # --- PROVISIONING LAYER (Lambda) ---
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: "sts:AssumeRole"}]
+      Policies:
+        - PolicyName: IoTProvisioningPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["logs:*", "iot:*"]
+                Resource: "*"
 
   CreateThingFunction:
     Type: AWS::Lambda::Function
@@ -221,83 +69,195 @@ Resources:
       Timeout: 300
       Code:
         ZipFile: !Sub |
-          import sys, cfnresponse, boto3, json, logging
-          logger = logging.getLogger()
-          logger.setLevel(logging.INFO)
+          import cfnresponse, boto3, json
           def handler(event, context):
               responseData = {}
               try:
-                  result = cfnresponse.FAILED
-                  iot = boto3.client('iot', region_name=event['ResourceProperties']['IoTCoreRegion'])
+                  iot = boto3.client('iot', region_name='${AWS::Region}')
                   thing_name = event['ResourceProperties']['ThingName']
                   if event['RequestType'] == 'Create':
                       keys = iot.create_keys_and_certificate(setAsActive=True)
                       cert_arn = keys['certificateArn']
-                      responseData.update({'certificateId': keys['certificateId'], 'certificatePem': keys['certificatePem'], 'privateKey': keys['keyPair']['PrivateKey']})
+                      responseData.update({
+                          'certificatePem': keys['certificatePem'],
+                          'privateKey': keys['keyPair']['PrivateKey'],
+                          'iotEndpoint': iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
+                      })
                       policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["iot:*"], "Resource": ["*"]}]}
-                      iot.create_policy(policyName=thing_name+'-policy', policyDocument=json.dumps(policy))
+                      policy_name = thing_name + '-policy'
+                      iot.create_policy(policyName=policy_name, policyDocument=json.dumps(policy))
                       iot.create_thing(thingName=thing_name)
-                      iot.attach_policy(policyName=thing_name+'-policy', target=cert_arn)
+                      iot.attach_policy(policyName=policy_name, target=cert_arn)
                       iot.attach_thing_principal(thingName=thing_name, principal=cert_arn)
-                      responseData['iotEndpoint'] = iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
-                      result = cfnresponse.SUCCESS
-                  else:
-                      result = cfnresponse.SUCCESS
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
               except Exception as e:
-                  logger.error(str(e))
-                  result = cfnresponse.FAILED
-              cfnresponse.send(event, context, result, responseData)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
 
   IoTThing1:
-    Type: Custom::IoTThing1
+    Type: Custom::IoTThing
     Properties:
       ServiceToken: !GetAtt CreateThingFunction.Arn
-      ThingName: "blog-vehicle-01"
-      FleetSize: "1"
-      IoTCoreRegion: !Ref IoTCoreRegion
-      IoTCoreEndpointUrl: !Ref IoTCoreEndpointUrl
+      ThingName: !Sub ${AWS::StackName}-vehicle-01
 
   IoTThing2:
-    Type: Custom::IoTThing2
+    Type: Custom::IoTThing
     Condition: IsFleetSize2
     Properties:
       ServiceToken: !GetAtt CreateThingFunction.Arn
-      ThingName: "blog-vehicle-02"
-      FleetSize: "1"
-      IoTCoreRegion: !Ref IoTCoreRegion
-      IoTCoreEndpointUrl: !Ref IoTCoreEndpointUrl
+      ThingName: !Sub ${AWS::StackName}-vehicle-02
 
-  LambdaExecutionRole:
+  # --- COMPUTE LAYER (EC2) ---
+  Ec2ServiceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: "sts:AssumeRole"}]
+        Statement: [{Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: "sts:AssumeRole"}]
       Policies:
-        - PolicyName: !Sub ${AWS::StackName}-Lambda-Policy
+        - PolicyName: FleetWiseAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "iot:*"]
+                Action: ["s3:*", "timestream:*", "iot:Publish", "iot:Subscribe", "iot:Connect", "iot:Receive"]
                 Resource: "*"
 
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Ec2ServiceRole]
+
+  Ec2Instance1:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal: {Count: 1, Timeout: PT30M}
+    Properties:
+      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      InstanceType: c8g.xlarge
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+          export DEBIAN_FRONTEND=noninteractive
+          # 1. Noble Fixes (Packages & Symlinks)
+          apt-get update -y
+          apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip htop \
+                             libprotobuf-dev protobuf-compiler libboost-all-dev libssl-dev \
+                             libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format
+          ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
+          ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+
+          # 2. AWS CLI
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
+
+          # 3. Patch & Build (The "Circular Link" and "PEP 668" fixes)
+          cd /home/ubuntu
+          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
+          cd aws-iot-fleetwise-edge
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
+          sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
+          sed -i 's/pip3 install/pip3 install --break-system-packages/g' tools/install-deps-native.sh
+          
+          ./tools/install-socketcan.sh --bus-count 1
+          sudo ./tools/install-deps-native.sh
+          sudo -u ubuntu ./tools/build-fwe-native.sh
+
+          # 4. Deploy Certs from Lambda
+          mkdir -p /etc/aws-iot-fleetwise
+          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
+
+          # 5. Configure & Install
+          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
+            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
+            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
+            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
+          
+          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
+          
+          # 6. Signal Success
+          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} \
+            --logical-resource-id Ec2Instance1 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
+            --status SUCCESS --region ${AWS::Region}
+
+  Ec2Instance2:
+    Type: AWS::EC2::Instance
+    Condition: IsFleetSize2
+    CreationPolicy:
+      ResourceSignal: {Count: 1, Timeout: PT30M}
+    Properties:
+      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      InstanceType: c8g.xlarge
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -xe
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y python3-pip python3-setuptools binutils can-utils git jq unzip htop \
+                             libprotobuf-dev protobuf-compiler libboost-all-dev libssl-dev \
+                             libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format
+          ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
+          ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
+          cd /home/ubuntu
+          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
+          cd aws-iot-fleetwise-edge
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
+          sed -i 's/pip3 install/pip3 install --break-system-packages/g' tools/install-deps-native.sh
+          ./tools/install-socketcan.sh --bus-count 1
+          sudo ./tools/install-deps-native.sh
+          sudo -u ubuntu ./tools/build-fwe-native.sh
+          mkdir -p /etc/aws-iot-fleetwise
+          echo "${IoTThing2.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "${IoTThing2.privateKey}" > /etc/aws-iot-fleetwise/private.key
+          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
+            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
+            --vehicle-name ${AWS::StackName}-vehicle-02 --endpoint-url ${IoTThing2.iotEndpoint} \
+            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
+          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
+          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} \
+            --logical-resource-id Ec2Instance2 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
+            --status SUCCESS --region ${AWS::Region}
 Outputs:
   Ec2Instance1PublicIp:
-    Description: "EC2 instance 1 public IP address"
+    Description: "Public IP address of the first vehicle simulation"
     Value: !GetAtt Ec2Instance1.PublicIp
 
   Ec2Instance1SSH:
-    Condition: KeyPairSpecifiedCondition
-    Description: "EC2 instance 1 SSH command"
+    Condition: KeyPairSpecified
+    Description: "SSH command to connect to Vehicle 1"
     Value: !Sub ssh -i ~/${Ec2KeyPair}.pem ubuntu@${Ec2Instance1.PublicIp}
 
   Ec2Instance2PublicIp:
     Condition: IsFleetSize2
-    Description: "EC2 instance 2 public IP address"
+    Description: "Public IP address of the second vehicle simulation"
     Value: !GetAtt Ec2Instance2.PublicIp
 
   Ec2Instance2SSH:
-    Condition: ShowInstance2SSH
-    Description: "EC2 instance 2 SSH command"
-    Value: !Sub ssh -i ~/${Ec2KeyPair}.pem ubuntu@${Ec2Instance2.PublicIp}
+    Condition: IsFleetSize2
+    # This nested check ensures we only show SSH if both a 2nd instance and a KeyPair exist
+    Value: !If 
+      - KeyPairSpecified
+      - !Sub "ssh -i ~/${Ec2KeyPair}.pem ubuntu@${Ec2Instance2.PublicIp}"
+      - !Ref "AWS::NoValue"
+
+  TimestreamDatabaseName:
+    Description: "The name of the created Timestream Database"
+    Value: !Ref TimestreamDatabase
+
+  TimestreamTableName:
+    Description: "The name of the created Timestream Table"
+    Value: !Ref TimestreamTable
+
+  IoTEndpoint:
+    Description: "The IoT ATS Endpoint used by the vehicles"
+    Value: !GetAtt IoTThing1.iotEndpoint
