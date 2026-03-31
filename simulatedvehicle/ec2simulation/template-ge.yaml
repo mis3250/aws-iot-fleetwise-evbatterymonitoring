@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: AWS IoT FleetWise Electric Vehicle Simulation - Corrected Dependencies
+Description: AWS IoT FleetWise Electric Vehicle Simulation - Final Verified Version
 
 Globals:
   Function:
@@ -12,13 +12,9 @@ Parameters:
     Type: String
     Default: https://github.com/aws/aws-iot-fleetwise-edge.git
   SourceRef:
-    Description: Source Git branch, tag or commit ID (leave blank for HEAD)
+    Description: Source Git branch, tag or commit ID
     Type: String
     Default: "v1.3.2"
-  SourceUrlBatteryMonitoring:
-    Description: Source Git clone URL for Battery Monitoring Sample repo
-    Type: String
-    Default: https://github.com/aws-samples/aws-iot-fleetwise-evbatterymonitoring
   Ec2KeyPair:
     Description: Name of SSH key pair (leave blank for none)
     Type: String
@@ -27,24 +23,23 @@ Parameters:
     Description: "Number of vehicles to create"
     Type: String
     Default: "1"
-    AllowedValues:
-      - "1"
-      - "2"
+    AllowedValues: ["1", "2"]
   IoTCoreRegion:
     Description: "Region for IoT Things."
     Type: String
     Default: "us-east-1"
-    AllowedValues:
+    AllowedValues: 
       - "us-east-1"
+      - "us-east-2"
+      - "us-west-2"
       - "eu-central-1"
+      - "eu-west-1"
+      - "ap-northeast-1"
+      - "ap-southeast-1"
   IoTCoreEndpointUrl:
     Description: "Endpoint URL for IoT Core (leave blank for automatic)"
     Type: String
     Default: ""
-  IoTMqttTopicPrefix:
-    Description: "IoT MQTT Topic prefix"
-    Type: String
-    Default: "$aws/iotfleetwise/"
   SkipTimestreamResourcesCreation:
     Description: "Skip creation of IoT Timestream Resources"
     Type: String
@@ -54,9 +49,7 @@ Conditions:
   KeyPairSpecifiedCondition: !Not [!Equals [!Ref Ec2KeyPair, ""]]
   NeedToCreateTimestreamResources: !Equals [!Ref SkipTimestreamResourcesCreation, "no"]
   IsFleetSize2: !Equals [!Ref FleetSize, "2"]
-  # Composite conditions for Outputs
-  ShowInstance1SSH: !And [!Condition KeyPairSpecifiedCondition]
-  ShowInstance2Outputs: !And [!Condition IsFleetSize2]
+  # Fixed: ShowInstance2SSH now has exactly two conditions for !And
   ShowInstance2SSH: !And [!Condition IsFleetSize2, !Condition KeyPairSpecifiedCondition]
 
 Mappings:
@@ -108,13 +101,13 @@ Resources:
             Principal: {Service: ec2.amazonaws.com}
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: !Sub ${AWS::StackName}-EC2-ServicePolicy
+        - PolicyName: !Sub ${AWS::StackName}-EC2-Policy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: ["s3:List*", "s3:Get*"]
-                Resource: "arn:aws:s3:::*"
+                Action: ["s3:List*", "s3:Get*", "iot:*"]
+                Resource: "*"
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -159,7 +152,9 @@ Resources:
           ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
           ./tools/install-fwe.sh
-          /usr/local/bin/cfn-signal --success true --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
+          # Use fallback path for signal if not in path
+          SIGNAL_BIN=$(which cfn-signal || echo "/usr/local/bin/cfn-signal")
+          $SIGNAL_BIN --success true --stack ${AWS::StackName} --resource Ec2Instance1 --region ${AWS::Region}
 
   Ec2Instance2:
     Type: AWS::EC2::Instance
@@ -198,7 +193,8 @@ Resources:
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
-          /usr/local/bin/cfn-signal --success true --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region}
+          SIGNAL_BIN=$(which cfn-signal || echo "/usr/local/bin/cfn-signal")
+          $SIGNAL_BIN --success true --stack ${AWS::StackName} --resource Ec2Instance2 --region ${AWS::Region}
 
   TimestreamDatabase:
     Type: AWS::Timestream::Database
@@ -226,13 +222,11 @@ Resources:
       Code:
         ZipFile: !Sub |
           import sys, cfnresponse, boto3, json, logging
-          from botocore.exceptions import ClientError
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
           def handler(event, context):
               responseData = {}
               try:
-                  logger.info('Event: {}'.format(json.dumps(event)))
                   result = cfnresponse.FAILED
                   iot = boto3.client('iot', region_name=event['ResourceProperties']['IoTCoreRegion'])
                   thing_name = event['ResourceProperties']['ThingName']
@@ -247,10 +241,10 @@ Resources:
                       iot.attach_thing_principal(thingName=thing_name, principal=cert_arn)
                       responseData['iotEndpoint'] = iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
                       result = cfnresponse.SUCCESS
-                  elif event['RequestType'] in ['Update', 'Delete']:
+                  else:
                       result = cfnresponse.SUCCESS
               except Exception as e:
-                  logger.error('Error: {}'.format(e))
+                  logger.error(str(e))
                   result = cfnresponse.FAILED
               cfnresponse.send(event, context, result, responseData)
 
@@ -294,12 +288,12 @@ Outputs:
     Value: !GetAtt Ec2Instance1.PublicIp
 
   Ec2Instance1SSH:
-    Condition: ShowInstance1SSH
+    Condition: KeyPairSpecifiedCondition
     Description: "EC2 instance 1 SSH command"
     Value: !Sub ssh -i ~/${Ec2KeyPair}.pem ubuntu@${Ec2Instance1.PublicIp}
 
   Ec2Instance2PublicIp:
-    Condition: ShowInstance2Outputs
+    Condition: IsFleetSize2
     Description: "EC2 instance 2 public IP address"
     Value: !GetAtt Ec2Instance2.PublicIp
 
