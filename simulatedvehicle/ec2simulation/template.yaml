@@ -39,6 +39,7 @@ Parameters:
     Default: "1"
     AllowedValues:
       - "1"
+      - "2"
   IoTCoreRegion:
     Description: "Region in which to create IoT Things. This must be the same region used to create IoT FleetWise Vehicles."
     Type: String
@@ -123,6 +124,12 @@ Resources:
         Timeout: PT30M
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true # Recommended so disks don't linger after deletion
       KeyName:
         !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
       InstanceType:
@@ -228,15 +235,15 @@ Resources:
           # Install FWE credentials and config file
           mkdir /etc/aws-iot-fleetwise
           mkdir /var/aws-iot-fleetwise
-          echo -n "${IoTThing2.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo -n "${IoTThing2.privateKey}" > /etc/aws-iot-fleetwise/private-key.key
+          echo -n "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+          echo -n "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private-key.key
           if ((${FleetSize}==1)); then
             echo "Configuring ${AWS::StackName}..."
             ./tools/configure-fwe.sh \
               --input-config-file "configuration/static-config.json" \
               --output-config-file "/etc/aws-iot-fleetwise/config-0.json" \
               --vehicle-name "blog-vehicle-01" \
-              --endpoint-url "${IoTThing2.iotEndpoint}" \
+              --endpoint-url "${IoTThing1.iotEndpoint}" \
               --topic-prefix '${IoTMqttTopicPrefix}' \
               --can-bus0 "vcan0"
           else
@@ -252,7 +259,7 @@ Resources:
                     --input-config-file "configuration/static-config.json" \
                     --output-config-file "/etc/aws-iot-fleetwise/config-$((i+j)).json" \
                     --vehicle-name "blog-vehicle-$((i+j))" \
-                    --endpoint-url "${IoTThing2.iotEndpoint}" \
+                    --endpoint-url "${IoTThing1.iotEndpoint}" \
                     --topic-prefix '${IoTMqttTopicPrefix}' \
                     --can-bus0 "vcan$((i+j))" \
                     --persistency-path "/var/aws-iot-fleetwise/fwe$((i+j))"; \
@@ -289,6 +296,12 @@ Resources:
         Timeout: PT30M
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true # Recommended so disks don't linger after deletion
       KeyName:
         !If [KeyPairSpecifiedCondition, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
       InstanceType:
