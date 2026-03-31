@@ -193,15 +193,15 @@ Resources:
       IamInstanceProfile: !Ref Ec2InstanceProfile
       KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
       
-      
-      
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -xe
           export DEBIAN_FRONTEND=noninteractive
-          # THIS IS THE CRITICAL FIX FOR UBUNTU 24.04
           export PIP_BREAK_SYSTEM_PACKAGES=1
+          
+          # This ensures the PEP 668 error never happens, even under sudo
+          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
 
           # 1. Noble Fixes (Packages & Symlinks)
           apt-get update -y
@@ -209,48 +209,14 @@ Resources:
                               libprotobuf-dev protobuf-compiler libboost-all-dev libssl-dev \
                               libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format
           
-          # Fix for FleetWise expecting clang 12 version-specific names
+          # Fix for FleetWise script dependencies
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
 
-          # 2. AWS CLI
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
+          # ... rest of your script ...    
+      
 
-          # 3. Patch & Build
-          cd /home/ubuntu
-          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
-          cd aws-iot-fleetwise-edge
-          
-          # We still need these because the scripts hardcode the version 12 names
-          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
-          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
-          sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
-          
-          ./tools/install-socketcan.sh --bus-count 1
-          # No need to sed pip anymore because of the export above
-          sudo ./tools/install-deps-native.sh
-          sudo -u ubuntu ./tools/build-fwe-native.sh
-
-          # 4. Deploy Certs
-          mkdir -p /etc/aws-iot-fleetwise
-          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
-
-          # 5. Configure & Install
-          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
-            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
-            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
-            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
-          
-          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
-          
-          # 6. Signal Success
-          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} \
-            --logical-resource-id Ec2Instance1 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
-            --status SUCCESS --region ${AWS::Region}
-
-
+ 
  
   Ec2Instance2:
     Type: AWS::EC2::Instance
@@ -269,8 +235,10 @@ Resources:
           #!/bin/bash
           set -xe
           export DEBIAN_FRONTEND=noninteractive
-          # THIS IS THE CRITICAL FIX FOR UBUNTU 24.04
           export PIP_BREAK_SYSTEM_PACKAGES=1
+          
+          # This ensures the PEP 668 error never happens, even under sudo
+          rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED
 
           # 1. Noble Fixes (Packages & Symlinks)
           apt-get update -y
@@ -278,47 +246,11 @@ Resources:
                               libprotobuf-dev protobuf-compiler libboost-all-dev libssl-dev \
                               libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format
           
-          # Fix for FleetWise expecting clang 12 version-specific names
+          # Fix for FleetWise script dependencies
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
 
-          # 2. AWS CLI
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip && ./aws/install && rm awscliv2.zip
-
-          # 3. Patch & Build
-          cd /home/ubuntu
-          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
-          cd aws-iot-fleetwise-edge
-          
-          # We still need these because the scripts hardcode the version 12 names
-          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
-          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
-          sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
-          
-          ./tools/install-socketcan.sh --bus-count 1
-          # No need to sed pip anymore because of the export above
-          sudo ./tools/install-deps-native.sh
-          sudo -u ubuntu ./tools/build-fwe-native.sh
-
-          # 4. Deploy Certs
-          mkdir -p /etc/aws-iot-fleetwise
-          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
-
-          # 5. Configure & Install
-          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
-            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
-            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
-            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
-          
-          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
-          
-          # 6. Signal Success
-          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} \
-            --logical-resource-id Ec2Instance1 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
-            --status SUCCESS --region ${AWS::Region}
-
+          # ... rest of your script ...
 
 Outputs:
   Ec2Instance1PublicIp:
