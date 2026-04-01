@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: AWS IoT FleetWise EV Simulation - Final Verified Multi-Vehicle Version (Ubuntu 24.04)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 Verified (Fixed Naming & IMDSv2)
 
 Parameters:
   Ec2KeyPair:
@@ -58,7 +58,7 @@ Resources:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
 
-  # --- PROVISIONING LAYER (Lambda) ---
+  # --- PROVISIONING LAYER ---
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -135,7 +135,7 @@ Resources:
       ServiceToken: !GetAtt CreateThingFunction.Arn
       ThingName: "blog-vehicle-02"
 
-  # --- COMPUTE LAYER (EC2) ---
+  # --- COMPUTE LAYER ---
   Ec2ServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -174,54 +174,63 @@ Resources:
           #!/bin/bash
           set -euo pipefail
           
-          # 1. Performance Tweak
+          # Fix IMDSv2 Token Fetching
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
+
+          # Error Trapping logic
+          error_handler() {
+            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region}
+          }
+          trap error_handler ERR
+
+          # OS Optimization
           echo 1048576 > /proc/sys/kernel/pid_max
           printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
           systemctl restart systemd-journald
 
-          # 2. Error Trapping logic
-          error_handler() {
-            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) --status FAILURE --region ${AWS::Region}
-          }
-          trap error_handler ERR
-
-          # 3. Software Dependencies
+          # Software Dependencies
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev
 
-          # 4. AWS CLI
+          # AWS CLI
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
-          # 5. Build FleetWise
+          # Build FleetWise & Patch scripts for Ubuntu 24.04
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
-          ./tools/install-socketcan.sh --bus-count 1
+          
+          # CRITICAL: Patch the repo script to use generic clang tools available in 24.04
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+
+          ./tools/install-socketcan.sh --bus-count 1
           sudo ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
-          # 6. Auth Config
+          # Auth Config
           mkdir -p /etc/aws-iot-fleetwise
           echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
           echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
 
-          # 7. Provision & Install
+          # Provision & Install
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
-            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
+            --vehicle-name blog-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           
           # Signal SUCCESS
-          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) --status SUCCESS --region ${AWS::Region}
+          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
   Ec2Instance2:
     Type: AWS::EC2::Instance
@@ -239,12 +248,11 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           set -euo pipefail
-          echo 1048576 > /proc/sys/kernel/pid_max
-          printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
-          systemctl restart systemd-journald
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
           
           error_handler() {
-            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) --status FAILURE --region ${AWS::Region}
+            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region}
           }
           trap error_handler ERR
 
@@ -258,9 +266,13 @@ Resources:
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
-          ./tools/install-socketcan.sh --bus-count 1
+          
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+
+          ./tools/install-socketcan.sh --bus-count 1
           sudo ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
@@ -272,18 +284,16 @@ Resources:
 
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
-            --vehicle-name ${AWS::StackName}-vehicle-02 --endpoint-url ${IoTThing2.iotEndpoint} \
+            --vehicle-name blog-vehicle-02 --endpoint-url ${IoTThing2.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           
-          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) --status SUCCESS --region ${AWS::Region}
+          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
 Outputs:
   Ec2Instance1PublicIp:
     Value: !GetAtt Ec2Instance1.PublicIp
   IoTEndpoint:
     Value: !GetAtt IoTThing1.iotEndpoint
-  TimestreamTableName:
-    Value: !Ref TimestreamTable
