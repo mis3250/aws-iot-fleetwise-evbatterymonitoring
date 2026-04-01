@@ -1,20 +1,15 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 Verified (Fixed Naming & IMDSv2)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (IAM & Signaling Fixed)
 
 Parameters:
   Ec2KeyPair:
     Type: String
-    Description: Name of SSH key pair (leave blank for none)
     Default: ""
   FleetSize:
     Type: String
     Default: "1"
     AllowedValues: ["1", "2"]
-  IoTCoreRegion:
-    Type: String
-    Default: "us-east-1"
-    AllowedValues: ["us-east-1", "us-east-2", "us-west-2", "eu-central-1", "eu-west-1"]
 
 Conditions:
   IsFleetSize2: !Equals [!Ref FleetSize, "2"]
@@ -43,7 +38,6 @@ Resources:
       ToPort: 22
       CidrIp: "0.0.0.0/0"
 
-  # --- DATABASE LAYER ---
   TimestreamDatabase:
     Type: AWS::Timestream::Database
     Properties:
@@ -58,7 +52,6 @@ Resources:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
 
-  # --- PROVISIONING LAYER ---
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -135,7 +128,6 @@ Resources:
       ServiceToken: !GetAtt CreateThingFunction.Arn
       ThingName: "blog-vehicle-02"
 
-  # --- COMPUTE LAYER ---
   Ec2ServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -145,13 +137,16 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
-        - PolicyName: FleetWiseAccess
+        - PolicyName: FleetWiseFullAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: ["s3:*", "timestream:*", "iot:*"]
                 Resource: "*"
+              - Effect: Allow
+                Action: ["cloudformation:SignalResource"]
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -172,38 +167,37 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          # Redirect all output to a log file we can check
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           set -euo pipefail
           
-          # Fix IMDSv2 Token Fetching
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
 
-          # Error Trapping logic
           error_handler() {
+            echo "Error occurred. Last 20 lines of log:"
+            tail -n 20 /var/log/user-data.log
             /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region}
           }
           trap error_handler ERR
 
-          # OS Optimization
+          # OS and App Setup
           echo 1048576 > /proc/sys/kernel/pid_max
           printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
           systemctl restart systemd-journald
 
-          # Software Dependencies
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev
 
-          # AWS CLI
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
-          # Build FleetWise & Patch scripts for Ubuntu 24.04
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
           
-          # CRITICAL: Patch the repo script to use generic clang tools available in 24.04
+          # Ubuntu 24.04 Compatibility Patches
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
@@ -213,14 +207,12 @@ Resources:
           sudo ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
-          # Auth Config
           mkdir -p /etc/aws-iot-fleetwise
           echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
           echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
 
-          # Provision & Install
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
             --vehicle-name blog-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
@@ -229,7 +221,6 @@ Resources:
           
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           
-          # Signal SUCCESS
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
   Ec2Instance2:
@@ -247,11 +238,13 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           set -euo pipefail
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
           
           error_handler() {
+            tail -n 20 /var/log/user-data.log
             /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region}
           }
           trap error_handler ERR
