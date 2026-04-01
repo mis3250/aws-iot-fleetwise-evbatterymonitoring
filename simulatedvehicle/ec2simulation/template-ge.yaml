@@ -287,7 +287,7 @@ Resources:
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
           SECRET_ARN="${IoTThing1.secretArn}"
-          echo "Waiting for secret ${SECRET_ARN}..."
+          echo "Waiting for secret $SECRET_ARN..."
           for i in {1..30}; do
             if aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > /tmp/secret.json 2>/dev/null; then
               break
@@ -375,7 +375,7 @@ Resources:
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
           SECRET_ARN="${IoTThing2.secretArn}"
-          echo "Waiting for secret ${SECRET_ARN}..."
+          echo "Waiting for secret $SECRET_ARN..."
           for i in {1..30}; do
             if aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > /tmp/secret.json 2>/dev/null; then
               break
