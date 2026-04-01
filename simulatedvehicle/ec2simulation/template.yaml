@@ -713,7 +713,7 @@ Mappings:
       AMIID: ami-0327006c87b23e535
   FleetSizeEc2InstanceTypeMap:
     "1":
-      InstanceType: m6g.xlarge
+      InstanceType: c8g.xlarge
     "2":
       InstanceType: m6g.2xlarge
     "10":
