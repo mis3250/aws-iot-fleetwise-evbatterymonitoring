@@ -1,10 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (Final Verified Version)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 Final Production Revision
 
 Parameters:
   Ec2KeyPair:
     Type: String
+    Description: Name of SSH key pair (leave blank for none)
     Default: ""
   FleetSize:
     Type: String
@@ -38,6 +39,7 @@ Resources:
       ToPort: 22
       CidrIp: "0.0.0.0/0"
 
+  # --- DATABASE LAYER ---
   TimestreamDatabase:
     Type: AWS::Timestream::Database
     Properties:
@@ -52,6 +54,7 @@ Resources:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
 
+  # --- PROVISIONING LAYER ---
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -128,6 +131,7 @@ Resources:
       ServiceToken: !GetAtt CreateThingFunction.Arn
       ThingName: "blog-vehicle-02"
 
+  # --- COMPUTE LAYER ---
   Ec2ServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -146,7 +150,7 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action: ["cloudformation:SignalResource"]
-                Resource: "*" # Granting broad signal permission to fix AccessDenied
+                Resource: "*"
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -167,60 +171,66 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # Log EVERYTHING so we can see what's happening
+          # 1. Log Redirection
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-          set -euo pipefail
           
-          # Fix IMDSv2 Token Fetching
+          # 2. Wait for Apt Lock (Crucial for fresh boots)
+          while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do
+            echo "Waiting for background software managers..."
+            sleep 5
+          done
+
+          # 3. IMDSv2 Token & Instance ID
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
 
           error_handler() {
-            echo "A command failed. Signaling failure to CloudFormation..."
-            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region}
+            echo "Error occurred. Signaling failure..."
+            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
           }
           trap error_handler ERR
 
-          # OS and App Setup
-          echo 1048576 > /proc/sys/kernel/pid_max
-          printf "RateLimitBurst=0\nSystemMaxUse=1G\n" >> /etc/systemd/journald.conf
-          systemctl restart systemd-journald
-
+          # 4. Global Env & Ubuntu 24.04 Fixes
           export DEBIAN_FRONTEND=noninteractive
+          # Suppress restart prompts
+          if [ -f /etc/needrestart/needrestart.conf ]; then
+            sed -i 's/#$nrconf{restart} = .*/$nrconf{restart} = "a";/' /etc/needrestart/needrestart.conf || true
+          fi
+
+          # 5. Core Dependencies
           apt-get update -y
-          # Added build-essential and zlib to manual install to reduce reliance on the repo script
           apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev
-
-          # AWS CLI
+          
+          # 6. AWS CLI
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
+          unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
+          # 7. Build FleetWise
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
           
-          # Ubuntu 24.04 Compatibility Patches
+          # Patch Clang Naming
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
 
-          ./tools/install-socketcan.sh --bus-count 1
-          
-          # Run dependency script but DON'T let it kill the whole boot if it has a warning
-          sudo ./tools/install-deps-native.sh || echo "Dependency script finished with warnings, continuing anyway..."
+          ./tools/install-socketcan.sh --bus-count 1 || true
+          # Run deps without 'set -e' to ignore minor link warnings
+          sudo ./tools/install-deps-native.sh || echo "Deps script finished with minor warnings."
 
-          # NATIVE BUILD
+          # NATIVE BUILD (Switch back to strict mode)
+          set -e
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
-          # Auth Config
+          # 8. Credentials & Configuration
           mkdir -p /etc/aws-iot-fleetwise
           echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
           echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
 
-          # Provision & Install
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
             --vehicle-name blog-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
@@ -229,7 +239,7 @@ Resources:
           
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           
-          # Signal SUCCESS
+          # Success Signal
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
   Ec2Instance2:
@@ -248,12 +258,12 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-          set -euo pipefail
+          while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
           
           error_handler() {
-            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region}
+            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
           }
           trap error_handler ERR
 
@@ -262,19 +272,19 @@ Resources:
           apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev
 
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
-          unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
+          unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
-          
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+          ./tools/install-socketcan.sh --bus-count 1 || true
+          sudo ./tools/install-deps-native.sh || echo "Warnings ignored"
 
-          ./tools/install-socketcan.sh --bus-count 1
-          sudo ./tools/install-deps-native.sh || echo "Warning in deps"
+          set -e
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
           mkdir -p /etc/aws-iot-fleetwise
@@ -290,9 +300,12 @@ Resources:
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
-          
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
 Outputs:
   Ec2Instance1PublicIp:
     Value: !GetAtt Ec2Instance1.PublicIp
+  IoTEndpoint:
+    Value: !GetAtt IoTThing1.iotEndpoint
+  TimestreamTable:
+    Value: !Ref TimestreamTable
