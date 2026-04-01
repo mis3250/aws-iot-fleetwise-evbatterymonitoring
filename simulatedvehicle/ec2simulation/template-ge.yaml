@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (Final Verified Production Version)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (Standard CloudFormation - SDK & Storage Fixed)
 
 Parameters:
   Ec2KeyPair:
@@ -57,7 +57,7 @@ Resources:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
 
-  # --- PROVISIONING LAYER (Lambda) ---
+  # --- PROVISIONING LAYER ---
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -127,13 +127,6 @@ Resources:
       ServiceToken: !GetAtt CreateThingFunction.Arn
       ThingName: "blog-vehicle-01"
 
-  IoTThing2:
-    Type: Custom::IoTThing
-    Condition: IsFleetSize2
-    Properties:
-      ServiceToken: !GetAtt CreateThingFunction.Arn
-      ThingName: "blog-vehicle-02"
-
   # --- COMPUTE LAYER (EC2) ---
   Ec2ServiceRole:
     Type: AWS::IAM::Role
@@ -181,76 +174,65 @@ Resources:
         Fn::Base64: !Sub |
           #!/bin/bash
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          
+          # Wait for Apt Lock
           while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
+
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
+
           error_handler() {
             /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
           }
           trap error_handler ERR
+
+          # OS Compatibility Fixes
           ln -sf /usr/bin/python3 /usr/bin/python
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev protobuf-compiler libprotobuf-dev doxygen libpulse-dev
+
+          # AWS CLI
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
+
+          # FleetWise Build
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
+          
+          # Fix Clang naming
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+
           ./tools/install-socketcan.sh --bus-count 1 || true
+          # THE SDK FIX: Install dependencies and compile
           sudo ./tools/install-deps-native.sh
+
+          # NATIVE BUILD
           set -e
           sudo -u ubuntu ./tools/build-fwe-native.sh
+
+          # Auth Config
           mkdir -p /etc/aws-iot-fleetwise
           echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
           echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
+
+          # Provision & Install
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
             --vehicle-name blog-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
+          
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
+          
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
-  Ec2Instance2:
-    Type: AWS::EC2::Instance
-    Condition: IsFleetSize2
-    DependsOn: [IoTThing2, TimestreamTable]
-    CreationPolicy:
-      ResourceSignal: {Count: 1, Timeout: PT30M}
-    Properties:
-      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
-      InstanceType: c8g.xlarge
-      IamInstanceProfile: !Ref Ec2InstanceProfile
-      SecurityGroupIds: [!Ref Ec2SecurityGroup]
-      KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
-      BlockDeviceMappings:
-        - DeviceName: /dev/sda1
-          Ebs:
-            VolumeSize: 50 
-            VolumeType: gp3
-            DeleteOnTermination: true
-      MetadataOptions:
-        HttpTokens: required
-        HttpPutResponseHopLimit: 1
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-          while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
-          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
-          error_handler() {
-            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
-          }
-          trap error_handler ERR
-          ln -sf /usr/bin/python3 /usr/bin/python
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update -y
-          apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq
+Outputs:
+  Ec2Instance1PublicIp:
+    Value: !GetAtt Ec2Instance1.PublicIp
