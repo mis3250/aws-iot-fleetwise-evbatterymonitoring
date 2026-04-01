@@ -25,11 +25,11 @@ Conditions:
 
 Mappings:
   AMIRegionMap:
-    us-east-1: { AMIID: "ami-01a2996ca45a3a3b1" }
-    us-east-2: { AMIID: "ami-0b7ac63ed6aebcc83" }
-    us-west-2: { AMIID: "ami-073ed67f4e90c9cc0" }
-    eu-central-1: { AMIID: "ami-0d61e97f110565325" }
-    eu-west-1: { AMIID: "ami-03a5a0c94efde632c" }
+    us-east-1: {AMIID: ami-0bc0f64eea5d47edf}
+    us-east-2: {AMIID: ami-0275817a3a9018e6c}
+    us-west-2: {AMIID: ami-047a505f037be3a7d}
+    eu-central-1: {AMIID: ami-043516556e409f874}
+    eu-west-1: {AMIID: ami-0568015f8e029497e}
 
 Resources:
   Ec2SecurityGroup:
