@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (arm64, Secrets Manager, Condition Fix, SDK path fix, static AMI)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (arm64, Secrets Manager, Condition Fix, SDK path fix)
 
 Parameters:
   Ec2KeyPair:
@@ -24,7 +24,6 @@ Conditions:
   KeyPairSpecified: !Not [!Equals [!Ref Ec2KeyPair, ""]]
 
 Mappings:
-  # Ubuntu 24.04 LTS (Noble) ARM64 AMI IDs - verified as of April 2025
   AMIRegionMap:
     us-east-1:
       AMIID: ami-01a2996ca45a3a3b1
@@ -38,7 +37,6 @@ Mappings:
       AMIID: ami-03a5a0c94efde632c
 
 Resources:
-  # --- SECURITY GROUP ---
   Ec2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -53,7 +51,6 @@ Resources:
       ToPort: 22
       CidrIp: !Ref SshCidr
 
-  # --- DATABASE LAYER ---
   TimestreamDatabase:
     Type: AWS::Timestream::Database
     Properties:
@@ -68,7 +65,6 @@ Resources:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
 
-  # --- PROVISIONING LAYER (Lambda + Custom Resources) ---
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -132,13 +128,11 @@ Resources:
                   policy_name = f"{thing_name}-policy"
 
                   if event['RequestType'] == 'Create':
-                      # Create IoT certificate and keys
                       keys = iot.create_keys_and_certificate(setAsActive=True)
                       cert_arn = keys['certificateArn']
                       cert_pem = keys['certificatePem']
                       private_key = keys['keyPair']['PrivateKey']
 
-                      # Create IoT policy (restricted to the thing)
                       policy_doc = {
                           "Version": "2012-10-17",
                           "Statement": [{
@@ -156,7 +150,6 @@ Resources:
                       iot.attach_policy(policyName=policy_name, target=cert_arn)
                       iot.attach_thing_principal(thingName=thing_name, principal=cert_arn)
 
-                      # Store credentials in Secrets Manager
                       secret_value = {
                           "certificatePem": cert_pem,
                           "privateKey": private_key
@@ -177,7 +170,6 @@ Resources:
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
 
                   elif event['RequestType'] == 'Delete':
-                      # Detach and delete IoT resources
                       try:
                           principals = iot.list_thing_principals(thingName=thing_name).get('principals', [])
                           for cert_arn in principals:
@@ -191,7 +183,6 @@ Resources:
                       except Exception as e:
                           logger.warning(f"Error cleaning IoT resources: {e}")
 
-                      # Delete the secret
                       try:
                           secrets.delete_secret(SecretId=secret_name, ForceDeleteWithoutRecovery=True)
                       except Exception as e:
@@ -219,7 +210,6 @@ Resources:
       ServiceToken: !GetAtt CreateThingFunction.Arn
       ThingName: "blog-vehicle-02"
 
-  # --- COMPUTE LAYER (EC2 IAM) ---
   Ec2ServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -259,7 +249,6 @@ Resources:
     Properties:
       Roles: [!Ref Ec2ServiceRole]
 
-  # --- EC2 INSTANCES ---
   Ec2Instance1:
     Type: AWS::EC2::Instance
     DependsOn: [IoTThing1, TimestreamTable]
@@ -285,28 +274,18 @@ Resources:
           #!/bin/bash
           set -e
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-
-          # Wait for apt lock
           while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
-
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
-
           error_handler() {
             /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
           }
           trap error_handler ERR
-
-          # Install base packages
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev protobuf-compiler libprotobuf-dev doxygen libpulse-dev
-
-          # Install AWS CLI (arm64)
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
-
-          # Retrieve secret from Secrets Manager
           SECRET_ARN="${IoTThing1.secretArn}"
           echo "Waiting for secret ${SECRET_ARN}..."
           for i in {1..30}; do
@@ -319,62 +298,42 @@ Resources:
             echo "Failed to retrieve secret"
             exit 1
           fi
-
-          # Extract certificate and private key
           CERT_PEM=$(jq -r .certificatePem < /tmp/secret.json)
           PRIVATE_KEY=$(jq -r .privateKey < /tmp/secret.json)
-
-          # Build FleetWise Edge
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
-
-          # Fix clang tools for Ubuntu 24.04
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -sf /usr/bin/clang-tidy /usr/bin/clang-tidy-12
           ln -sf /usr/bin/clang-format /usr/bin/clang-format-12
-
-          # Install dependencies (SocketCAN and AWS SDK)
           ./tools/install-socketcan.sh --bus-count 1
           sudo ./tools/install-deps-native.sh
-
-          # Locate AWS SDK CMake config
           AWSSDK_DIR=""
           if [ -d "/usr/local/lib/cmake/AWSSDK" ]; then
               AWSSDK_DIR="/usr/local/lib/cmake/AWSSDK"
           elif [ -d "/usr/local/share/cmake/AWSSDK" ]; then
               AWSSDK_DIR="/usr/local/share/cmake/AWSSDK"
           fi
-
           if [ -z "$AWSSDK_DIR" ]; then
               echo "ERROR: Could not find AWSSDK CMake config directory." >&2
               exit 1
           fi
           echo "AWSSDK_DIR=$AWSSDK_DIR"
-
-          # Build FleetWise Edge with SDK path
           sudo -u ubuntu bash -c "export AWSSDK_DIR='$AWSSDK_DIR' && ./tools/build-fwe-native.sh"
-
-          # Configure
           mkdir -p /etc/aws-iot-fleetwise
           echo "$CERT_PEM" > /etc/aws-iot-fleetwise/certificate.pem
           echo "$PRIVATE_KEY" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
-
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
             --vehicle-name blog-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
-
-          # Install and start service
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           systemctl start fwe
           systemctl enable fwe
-
-          # Signal success
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
   Ec2Instance2:
@@ -403,25 +362,20 @@ Resources:
           #!/bin/bash
           set -e
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-
           while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
-
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
           INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
-
           error_handler() {
             /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
           }
           trap error_handler ERR
-
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev protobuf-compiler libprotobuf-dev doxygen libpulse-dev
-
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
-
           SECRET_ARN="${IoTThing2.secretArn}"
+          echo "Waiting for secret ${SECRET_ARN}..."
           for i in {1..30}; do
             if aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > /tmp/secret.json 2>/dev/null; then
               break
@@ -432,53 +386,42 @@ Resources:
             echo "Failed to retrieve secret"
             exit 1
           fi
-
           CERT_PEM=$(jq -r .certificatePem < /tmp/secret.json)
           PRIVATE_KEY=$(jq -r .privateKey < /tmp/secret.json)
-
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
-
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           ln -sf /usr/bin/clang-tidy /usr/bin/clang-tidy-12
           ln -sf /usr/bin/clang-format /usr/bin/clang-format-12
-
           ./tools/install-socketcan.sh --bus-count 1
           sudo ./tools/install-deps-native.sh
-
           AWSSDK_DIR=""
           if [ -d "/usr/local/lib/cmake/AWSSDK" ]; then
               AWSSDK_DIR="/usr/local/lib/cmake/AWSSDK"
           elif [ -d "/usr/local/share/cmake/AWSSDK" ]; then
               AWSSDK_DIR="/usr/local/share/cmake/AWSSDK"
           fi
-
           if [ -z "$AWSSDK_DIR" ]; then
               echo "ERROR: Could not find AWSSDK CMake config directory." >&2
               exit 1
           fi
           echo "AWSSDK_DIR=$AWSSDK_DIR"
-
           sudo -u ubuntu bash -c "export AWSSDK_DIR='$AWSSDK_DIR' && ./tools/build-fwe-native.sh"
-
           mkdir -p /etc/aws-iot-fleetwise
           echo "$CERT_PEM" > /etc/aws-iot-fleetwise/certificate.pem
           echo "$PRIVATE_KEY" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
-
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
             --vehicle-name blog-vehicle-02 --endpoint-url ${IoTThing2.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
-
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           systemctl start fwe
           systemctl enable fwe
-
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
 Outputs:
