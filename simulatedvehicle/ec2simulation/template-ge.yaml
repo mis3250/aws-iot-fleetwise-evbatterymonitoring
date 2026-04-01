@@ -188,6 +188,11 @@ Resources:
       ResourceSignal: {Count: 1, Timeout: PT30M}
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
       SecurityGroupIds: !Split [",", !GetAtt Ec2SecurityGroup.GroupId]
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
@@ -263,6 +268,11 @@ Resources:
       ResourceSignal: {Count: 1, Timeout: PT30M}
     Properties:
       ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
       SecurityGroupIds: !Split [",", !GetAtt Ec2SecurityGroup.GroupId]
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
@@ -271,13 +281,11 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # Exit on error and print commands to /var/log/cloud-init-output.log
           set -xe
           
           # 1. Environment & Python "PEP 668" Noble Fix
           export DEBIAN_FRONTEND=noninteractive
           export PIP_BREAK_SYSTEM_PACKAGES=1
-          # This removes the block that prevents pip from installing globally, even under sudo
           rm -f /usr/lib/python3.12/EXTERNALLY-MANAGED || true
 
           # 2. Install Core Dependencies
@@ -287,11 +295,11 @@ Resources:
                               libcurl4-openssl-dev pkg-config cmake clang-tidy clang-format \
                               libsnappy-dev parallel doxygen graphviz
           
-          # Fix for FleetWise scripts expecting specific versioned tool names
+          # Fix for FleetWise script dependencies
           ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
           ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
 
-          # 3. Install AWS CLI (ARM64 version for c8g)
+          # 3. Install AWS CLI (ARM64 version)
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
@@ -300,7 +308,6 @@ Resources:
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
 
-          # Patch scripts to use generic clang names and bypass Ubuntu 24.04 alternatives issues
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
           sed -i 's/update-alternatives/# update-alternatives/g' tools/install-deps-native.sh
@@ -310,26 +317,27 @@ Resources:
           sudo ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
-          # 6. Deploy Certificates from CloudFormation Custom Resource
+          # 6. Deploy Certificates (RESOURCES CHANGED TO IoTThing2)
           mkdir -p /etc/aws-iot-fleetwise
-          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
+          echo "${IoTThing2.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "${IoTThing2.privateKey}" > /etc/aws-iot-fleetwise/private.key
 
-          # 7. Configure and Install FWE Service
+          # 7. Configure and Install (NAME CHANGED TO vehicle-02)
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
             --output-config-file /etc/aws-iot-fleetwise/config-0.json \
-            --vehicle-name ${AWS::StackName}-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
+            --vehicle-name ${AWS::StackName}-vehicle-02 --endpoint-url ${IoTThing2.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key
           
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
           
-          # 8. Signal Success to CloudFormation
+          # 8. Signal Success (LOGICAL ID CHANGED TO Ec2Instance2)
           /usr/local/bin/aws cloudformation signal-resource \
             --stack-name ${AWS::StackName} \
-            --logical-resource-id Ec2Instance1 \
+            --logical-resource-id Ec2Instance2 \
             --unique-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) \
             --status SUCCESS \
-            --region ${AWS::Region} 
+            --region ${AWS::Region}
+ 
  
  
 Outputs:
