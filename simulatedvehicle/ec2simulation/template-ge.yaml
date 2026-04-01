@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (arm64, Secrets Manager, Condition Fix, SDK path fix)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (arm64, Secrets Manager, Condition Fix, SDK path fix, static AMI)
 
 Parameters:
   Ec2KeyPair:
@@ -22,6 +22,20 @@ Parameters:
 Conditions:
   IsFleetSize2: !Equals [!Ref FleetSize, "2"]
   KeyPairSpecified: !Not [!Equals [!Ref Ec2KeyPair, ""]]
+
+Mappings:
+  # Ubuntu 24.04 LTS (Noble) ARM64 AMI IDs - verified as of April 2025
+  AMIRegionMap:
+    us-east-1:
+      AMIID: ami-01a2996ca45a3a3b1
+    us-east-2:
+      AMIID: ami-0b7ac63ed6aebcc83
+    us-west-2:
+      AMIID: ami-073ed67f4e90c9cc0
+    eu-central-1:
+      AMIID: ami-0d61e97f110565325
+    eu-west-1:
+      AMIID: ami-03a5a0c94efde632c
 
 Resources:
   # --- SECURITY GROUP ---
@@ -248,7 +262,7 @@ Resources:
     CreationPolicy:
       ResourceSignal: { Count: 1, Timeout: PT45M }
     Properties:
-      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
       SecurityGroupIds: [!Ref Ec2SecurityGroup]
@@ -366,7 +380,7 @@ Resources:
     CreationPolicy:
       ResourceSignal: { Count: 1, Timeout: PT45M }
     Properties:
-      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
       SecurityGroupIds: [!Ref Ec2SecurityGroup]
