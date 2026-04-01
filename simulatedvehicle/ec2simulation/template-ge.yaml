@@ -246,9 +246,13 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource:
-                  - !GetAtt IoTThing1.secretArn
-                  - !If [IsFleetSize2, !GetAtt IoTThing2.secretArn, !Ref "AWS::NoValue"]
+                Resource: !GetAtt IoTThing1.secretArn
+              - !If
+                - IsFleetSize2
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !GetAtt IoTThing2.secretArn
+                - !Ref "AWS::NoValue"
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
