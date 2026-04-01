@@ -240,10 +240,16 @@ Resources:
           sudo ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
+         
           # 6. Deploy Certificates from CloudFormation Custom Resource
           mkdir -p /etc/aws-iot-fleetwise
-          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
+          cat <<EOF > /etc/aws-iot-fleetwise/certificate.pem
+          ${IoTThing1.certificatePem}
+          EOF
+
+          cat <<EOF > /etc/aws-iot-fleetwise/private.key
+          ${IoTThing1.privateKey}
+          EOF
 
           # 7. Configure and Install FWE Service
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
@@ -317,10 +323,17 @@ Resources:
           sudo ./tools/install-deps-native.sh
           sudo -u ubuntu ./tools/build-fwe-native.sh
 
-          # 6. Deploy Certificates (RESOURCES CHANGED TO IoTThing2)
+
+          # 6. Deploy Certificates from CloudFormation Custom Resource
           mkdir -p /etc/aws-iot-fleetwise
-          echo "${IoTThing2.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo "${IoTThing2.privateKey}" > /etc/aws-iot-fleetwise/private.key
+          cat <<EOF > /etc/aws-iot-fleetwise/certificate.pem
+          ${IoTThing1.certificatePem}
+          EOF
+
+          cat <<EOF > /etc/aws-iot-fleetwise/private.key
+          ${IoTThing1.privateKey}
+          EOF
+
 
           # 7. Configure and Install (NAME CHANGED TO vehicle-02)
           ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
