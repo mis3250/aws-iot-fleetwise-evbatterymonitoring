@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 Final (V13 - SDK, Disk, and Condition Fix)
+Description: AWS IoT FleetWise EV Simulation - Ubuntu 24.04 (arm64, Secrets Manager, Condition Fix, SDK path fix)
 
 Parameters:
   Ec2KeyPair:
@@ -14,26 +14,22 @@ Parameters:
     Type: String
     Default: "us-east-1"
     AllowedValues: ["us-east-1", "us-east-2", "us-west-2", "eu-central-1", "eu-west-1"]
+  SshCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: CIDR block for SSH access (change to your IP for production)
 
 Conditions:
   IsFleetSize2: !Equals [!Ref FleetSize, "2"]
-  # FIX: Explicitly defined to prevent Fn::If resolution errors
   KeyPairSpecified: !Not [!Equals [!Ref Ec2KeyPair, ""]]
 
-Mappings:
-  AMIRegionMap:
-    us-east-1: {AMIID: ami-0bc0f64eea5d47edf}
-    us-east-2: {AMIID: ami-0275817a3a9018e6c}
-    us-west-2: {AMIID: ami-047a505f037be3a7d}
-    eu-central-1: {AMIID: ami-043516556e409f874}
-    eu-west-1: {AMIID: ami-0568015f8e029497e}
-
 Resources:
+  # --- SECURITY GROUP ---
   Ec2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Instance security group
-  
+
   Ec2SecurityGroupSshIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -41,7 +37,7 @@ Resources:
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      CidrIp: "0.0.0.0/0"
+      CidrIp: !Ref SshCidr
 
   # --- DATABASE LAYER ---
   TimestreamDatabase:
@@ -58,21 +54,46 @@ Resources:
         MemoryStoreRetentionPeriodInHours: "24"
         MagneticStoreRetentionPeriodInDays: "7"
 
-  # --- PROVISIONING LAYER ---
+  # --- PROVISIONING LAYER (Lambda + Custom Resources) ---
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: [{Effect: Allow, Principal: {Service: lambda.amazonaws.com}, Action: "sts:AssumeRole"}]
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         - PolicyName: IoTProvisioningPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: ["logs:*", "iot:*"]
+                Action:
+                  - iot:CreateKeysAndCertificate
+                  - iot:CreatePolicy
+                  - iot:CreateThing
+                  - iot:AttachPolicy
+                  - iot:AttachThingPrincipal
+                  - iot:ListThingPrincipals
+                  - iot:DetachThingPrincipal
+                  - iot:DetachPolicy
+                  - iot:UpdateCertificate
+                  - iot:DeleteCertificate
+                  - iot:DeleteThing
+                  - iot:DeletePolicy
+                  - iot:DescribeEndpoint
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:PutSecretValue
+                Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:fleetwise-*"
 
   CreateThingFunction:
     Type: AWS::Lambda::Function
@@ -83,28 +104,66 @@ Resources:
       Timeout: 300
       Code:
         ZipFile: !Sub |
-          import cfnresponse, boto3, json
+          import cfnresponse, boto3, json, logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
           def handler(event, context):
               responseData = {}
               iot = boto3.client('iot', region_name='${AWS::Region}')
+              secrets = boto3.client('secretsmanager', region_name='${AWS::Region}')
               try:
                   thing_name = event['ResourceProperties']['ThingName']
+                  secret_name = f"fleetwise/{thing_name}/credentials"
                   policy_name = f"{thing_name}-policy"
+
                   if event['RequestType'] == 'Create':
+                      # Create IoT certificate and keys
                       keys = iot.create_keys_and_certificate(setAsActive=True)
                       cert_arn = keys['certificateArn']
-                      responseData.update({
-                          'certificatePem': keys['certificatePem'],
-                          'privateKey': keys['keyPair']['PrivateKey'],
-                          'iotEndpoint': iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
-                      })
-                      policy = {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["iot:*"], "Resource": ["*"]}]}
-                      iot.create_policy(policyName=policy_name, policyDocument=json.dumps(policy))
+                      cert_pem = keys['certificatePem']
+                      private_key = keys['keyPair']['PrivateKey']
+
+                      # Create IoT policy (restricted to the thing)
+                      policy_doc = {
+                          "Version": "2012-10-17",
+                          "Statement": [{
+                              "Effect": "Allow",
+                              "Action": ["iot:Connect", "iot:Publish", "iot:Subscribe", "iot:Receive"],
+                              "Resource": [
+                                  f"arn:aws:iot:${AWS::Region}:${AWS::AccountId}:client/{thing_name}",
+                                  f"arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/*",
+                                  f"arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/*"
+                              ]
+                          }]
+                      }
+                      iot.create_policy(policyName=policy_name, policyDocument=json.dumps(policy_doc))
                       iot.create_thing(thingName=thing_name)
                       iot.attach_policy(policyName=policy_name, target=cert_arn)
                       iot.attach_thing_principal(thingName=thing_name, principal=cert_arn)
+
+                      # Store credentials in Secrets Manager
+                      secret_value = {
+                          "certificatePem": cert_pem,
+                          "privateKey": private_key
+                      }
+                      try:
+                          secrets.create_secret(
+                              Name=secret_name,
+                              SecretString=json.dumps(secret_value)
+                          )
+                      except secrets.exceptions.ResourceExistsException:
+                          secrets.update_secret(
+                              SecretId=secret_name,
+                              SecretString=json.dumps(secret_value)
+                          )
+
+                      responseData['secretArn'] = secrets.describe_secret(SecretId=secret_name)['ARN']
+                      responseData['iotEndpoint'] = iot.describe_endpoint(endpointType='iot:Data-ATS')['endpointAddress']
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
                   elif event['RequestType'] == 'Delete':
+                      # Detach and delete IoT resources
                       try:
                           principals = iot.list_thing_principals(thingName=thing_name).get('principals', [])
                           for cert_arn in principals:
@@ -115,11 +174,22 @@ Resources:
                               iot.delete_certificate(certificateId=cert_id, forceDelete=True)
                           iot.delete_thing(thingName=thing_name)
                           iot.delete_policy(policyName=policy_name)
-                      except: pass
+                      except Exception as e:
+                          logger.warning(f"Error cleaning IoT resources: {e}")
+
+                      # Delete the secret
+                      try:
+                          secrets.delete_secret(SecretId=secret_name, ForceDeleteWithoutRecovery=True)
+                      except Exception as e:
+                          logger.warning(f"Error deleting secret {secret_name}: {e}")
+
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
                   else:
                       cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+
               except Exception as e:
+                  logger.error(f"Lambda failed: {e}")
                   cfnresponse.send(event, context, cfnresponse.FAILED, {"Error": str(e)})
 
   IoTThing1:
@@ -128,13 +198,23 @@ Resources:
       ServiceToken: !GetAtt CreateThingFunction.Arn
       ThingName: "blog-vehicle-01"
 
-  # --- COMPUTE LAYER ---
+  IoTThing2:
+    Type: Custom::IoTThing
+    Condition: IsFleetSize2
+    Properties:
+      ServiceToken: !GetAtt CreateThingFunction.Arn
+      ThingName: "blog-vehicle-02"
+
+  # --- COMPUTE LAYER (EC2 IAM) ---
   Ec2ServiceRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
-        Statement: [{Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: "sts:AssumeRole"}]
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: "sts:AssumeRole"
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
@@ -143,21 +223,32 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: ["s3:*", "timestream:*", "iot:*", "cloudformation:SignalResource"]
+                Action:
+                  - timestream:WriteRecords
+                  - iot:Connect
+                  - iot:Publish
+                  - iot:Subscribe
+                  - iot:Receive
                 Resource: "*"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !GetAtt IoTThing1.secretArn
+                  - !If [IsFleetSize2, !GetAtt IoTThing2.secretArn, !Ref "AWS::NoValue"]
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
       Roles: [!Ref Ec2ServiceRole]
 
+  # --- EC2 INSTANCES ---
   Ec2Instance1:
     Type: AWS::EC2::Instance
     DependsOn: [IoTThing1, TimestreamTable]
     CreationPolicy:
-      ResourceSignal: {Count: 1, Timeout: PT45M} # Increased timeout for AWSSDK build
+      ResourceSignal: { Count: 1, Timeout: PT45M }
     Properties:
-      ImageId: !FindInMap [AMIRegionMap, !Ref "AWS::Region", AMIID]
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
       InstanceType: c8g.xlarge
       IamInstanceProfile: !Ref Ec2InstanceProfile
       SecurityGroupIds: [!Ref Ec2SecurityGroup]
@@ -165,7 +256,7 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
-            VolumeSize: 50 
+            VolumeSize: 50
             VolumeType: gp3
             DeleteOnTermination: true
       MetadataOptions:
@@ -174,10 +265,10 @@ Resources:
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          # 1. Logging setup
+          set -e
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-          
-          # 2. Wait for Apt Lock
+
+          # Wait for apt lock
           while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
 
           TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
@@ -188,40 +279,69 @@ Resources:
           }
           trap error_handler ERR
 
-          # 3. Ubuntu 24.04 Compatibility Fixes
-          ln -sf /usr/bin/python3 /usr/bin/python
+          # Install base packages
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
-          # Manual install of AWSSDK build requirements
           apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev protobuf-compiler libprotobuf-dev doxygen libpulse-dev
 
-          # 4. AWS CLI Install
+          # Install AWS CLI (arm64)
           curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
           unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
 
-          # 5. Build FleetWise Edge
+          # Retrieve secret from Secrets Manager
+          SECRET_ARN="${IoTThing1.secretArn}"
+          echo "Waiting for secret ${SECRET_ARN}..."
+          for i in {1..30}; do
+            if aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > /tmp/secret.json 2>/dev/null; then
+              break
+            fi
+            sleep 10
+          done
+          if [ ! -f /tmp/secret.json ]; then
+            echo "Failed to retrieve secret"
+            exit 1
+          fi
+
+          # Extract certificate and private key
+          CERT_PEM=$(jq -r .certificatePem < /tmp/secret.json)
+          PRIVATE_KEY=$(jq -r .privateKey < /tmp/secret.json)
+
+          # Build FleetWise Edge
           cd /home/ubuntu
           sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
           cd aws-iot-fleetwise-edge
-          
-          # Patch Clang versioning for 24.04
+
+          # Fix clang tools for Ubuntu 24.04
           sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
           sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
-          ln -s /usr/bin/clang-tidy /usr/bin/clang-tidy-12 || true
-          ln -s /usr/bin/clang-format /usr/bin/clang-format-12 || true
+          ln -sf /usr/bin/clang-tidy /usr/bin/clang-tidy-12
+          ln -sf /usr/bin/clang-format /usr/bin/clang-format-12
 
-          ./tools/install-socketcan.sh --bus-count 1 || true
-          # FORCE BUILD SDK
+          # Install dependencies (SocketCAN and AWS SDK)
+          ./tools/install-socketcan.sh --bus-count 1
           sudo ./tools/install-deps-native.sh
 
-          # 6. NATIVE BUILD
-          set -e
-          sudo -u ubuntu ./tools/build-fwe-native.sh
+          # Locate AWS SDK CMake config
+          AWSSDK_DIR=""
+          if [ -d "/usr/local/lib/cmake/AWSSDK" ]; then
+              AWSSDK_DIR="/usr/local/lib/cmake/AWSSDK"
+          elif [ -d "/usr/local/share/cmake/AWSSDK" ]; then
+              AWSSDK_DIR="/usr/local/share/cmake/AWSSDK"
+          fi
 
-          # 7. Credentials & Final Configuration
+          if [ -z "$AWSSDK_DIR" ]; then
+              echo "ERROR: Could not find AWSSDK CMake config directory." >&2
+              exit 1
+          fi
+          echo "AWSSDK_DIR=$AWSSDK_DIR"
+
+          # Build FleetWise Edge with SDK path
+          sudo -u ubuntu bash -c "export AWSSDK_DIR='$AWSSDK_DIR' && ./tools/build-fwe-native.sh"
+
+          # Configure
           mkdir -p /etc/aws-iot-fleetwise
-          echo "${IoTThing1.certificatePem}" > /etc/aws-iot-fleetwise/certificate.pem
-          echo "${IoTThing1.privateKey}" > /etc/aws-iot-fleetwise/private.key
+          echo "$CERT_PEM" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "$PRIVATE_KEY" > /etc/aws-iot-fleetwise/private.key
           curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
           openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
 
@@ -230,14 +350,127 @@ Resources:
             --vehicle-name blog-vehicle-01 --endpoint-url ${IoTThing1.iotEndpoint} \
             --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
             --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
-          
+
+          # Install and start service
           sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
-          
-          # 8. SIGNAL SUCCESS
+          systemctl start fwe
+          systemctl enable fwe
+
+          # Signal success
           /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance1 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
+
+  Ec2Instance2:
+    Type: AWS::EC2::Instance
+    Condition: IsFleetSize2
+    DependsOn: [IoTThing2, TimestreamTable]
+    CreationPolicy:
+      ResourceSignal: { Count: 1, Timeout: PT45M }
+    Properties:
+      ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp2/ami-id}}'
+      InstanceType: c8g.xlarge
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      SecurityGroupIds: [!Ref Ec2SecurityGroup]
+      KeyName: !If [KeyPairSpecified, !Ref Ec2KeyPair, !Ref "AWS::NoValue"]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            DeleteOnTermination: true
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+          while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 ; do sleep 5; done
+
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
+
+          error_handler() {
+            /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status FAILURE --region ${AWS::Region} || true
+          }
+          trap error_handler ERR
+
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y build-essential python3-pip python3-numpy python3-pandas can-utils git jq unzip libssl-dev libcurl4-openssl-dev cmake clang-tidy clang-format libboost-all-dev zlib1g-dev libsnappy-dev protobuf-compiler libprotobuf-dev doxygen libpulse-dev
+
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+          unzip -o awscliv2.zip && ./aws/install && rm -rf awscliv2.zip aws/
+
+          SECRET_ARN="${IoTThing2.secretArn}"
+          for i in {1..30}; do
+            if aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text > /tmp/secret.json 2>/dev/null; then
+              break
+            fi
+            sleep 10
+          done
+          if [ ! -f /tmp/secret.json ]; then
+            echo "Failed to retrieve secret"
+            exit 1
+          fi
+
+          CERT_PEM=$(jq -r .certificatePem < /tmp/secret.json)
+          PRIVATE_KEY=$(jq -r .privateKey < /tmp/secret.json)
+
+          cd /home/ubuntu
+          sudo -u ubuntu git clone https://github.com/aws/aws-iot-fleetwise-edge.git
+          cd aws-iot-fleetwise-edge
+
+          sed -i 's/clang-tidy-12/clang-tidy/g' tools/install-deps-native.sh
+          sed -i 's/clang-format-12/clang-format/g' tools/install-deps-native.sh
+          ln -sf /usr/bin/clang-tidy /usr/bin/clang-tidy-12
+          ln -sf /usr/bin/clang-format /usr/bin/clang-format-12
+
+          ./tools/install-socketcan.sh --bus-count 1
+          sudo ./tools/install-deps-native.sh
+
+          AWSSDK_DIR=""
+          if [ -d "/usr/local/lib/cmake/AWSSDK" ]; then
+              AWSSDK_DIR="/usr/local/lib/cmake/AWSSDK"
+          elif [ -d "/usr/local/share/cmake/AWSSDK" ]; then
+              AWSSDK_DIR="/usr/local/share/cmake/AWSSDK"
+          fi
+
+          if [ -z "$AWSSDK_DIR" ]; then
+              echo "ERROR: Could not find AWSSDK CMake config directory." >&2
+              exit 1
+          fi
+          echo "AWSSDK_DIR=$AWSSDK_DIR"
+
+          sudo -u ubuntu bash -c "export AWSSDK_DIR='$AWSSDK_DIR' && ./tools/build-fwe-native.sh"
+
+          mkdir -p /etc/aws-iot-fleetwise
+          echo "$CERT_PEM" > /etc/aws-iot-fleetwise/certificate.pem
+          echo "$PRIVATE_KEY" > /etc/aws-iot-fleetwise/private.key
+          curl -s https://www.amazontrust.com/repository/AmazonRootCA1.pem -o /etc/aws-iot-fleetwise/AmazonRootCA1.pem
+          openssl rsa -in /etc/aws-iot-fleetwise/private.key -out /etc/aws-iot-fleetwise/private.key -traditional
+
+          ./tools/configure-fwe.sh --input-config-file configuration/static-config.json \
+            --output-config-file /etc/aws-iot-fleetwise/config-0.json \
+            --vehicle-name blog-vehicle-02 --endpoint-url ${IoTThing2.iotEndpoint} \
+            --certificate /etc/aws-iot-fleetwise/certificate.pem --private-key /etc/aws-iot-fleetwise/private.key \
+            --root-ca /etc/aws-iot-fleetwise/AmazonRootCA1.pem
+
+          sudo ./tools/install-fwe.sh /etc/aws-iot-fleetwise/config-0.json
+          systemctl start fwe
+          systemctl enable fwe
+
+          /usr/local/bin/aws cloudformation signal-resource --stack-name ${AWS::StackName} --logical-resource-id Ec2Instance2 --unique-id "$INSTANCE_ID" --status SUCCESS --region ${AWS::Region}
 
 Outputs:
   Ec2Instance1PublicIp:
     Value: !GetAtt Ec2Instance1.PublicIp
-  IoTEndpoint:
+  Ec2Instance2PublicIp:
+    Condition: IsFleetSize2
+    Value: !GetAtt Ec2Instance2.PublicIp
+  IoTEndpoint1:
     Value: !GetAtt IoTThing1.iotEndpoint
+  IoTEndpoint2:
+    Condition: IsFleetSize2
+    Value: !GetAtt IoTThing2.iotEndpoint
