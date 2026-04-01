@@ -6,6 +6,17 @@ Parameters:
     Type: String
     Description: Name of SSH key pair (leave blank for none)
     Default: ""
+  IoTCoreRegion:
+    Description: "Region in which to create IoT Things. This must be the same region used to create IoT FleetWise Vehicles."
+    Type: String
+    Default: "us-east-1"
+    AllowedValues:
+      - "us-east-1"
+      - "eu-central-1"
+  IoTCoreEndpointUrl:
+    Description: "Endpoint URL for IoT Core (leave blank for automatic)"
+    Type: String
+    Default: ""
   FleetSize:
     Type: String
     Default: "1"
